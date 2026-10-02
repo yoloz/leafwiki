@@ -16,7 +16,7 @@ If you've looked at Wiki.js or Outline and thought "this is too much to operate 
 ```bash
 docker run -p 8080:8080 -v ~/leafwiki-data:/app/data \
   ghcr.io/perber/leafwiki:latest \
-  --jwt-secret=yoursecret --admin-password=yourpassword --allow-insecure=true
+  --jwt-secret=yoursecret --admin-password=yourpassword --allow-insecure=true --no-tls
 ```
 
 → [All install options](#install) (Docker Compose, Linux installer, binary)
@@ -90,6 +90,11 @@ docker run -p 8080:8080 -v ~/leafwiki-data:/app/data \
 - Email via SMTP for password reset and user invitations (`--smtp-host`, v0.13.0)
 - Git backup — push wiki content to a remote Git repository via SSH or HTTP(S) (`--git-backup`, v0.11.3, experimental)
 
+**URL import:**
+- Import a page from a public URL — fetches the page, extracts its main article as Markdown, and lets the configured LLM clean/summarize it before you create the page
+- SSRF-protected: only public `http(s)` URLs are allowed; requests resolving to private/loopback/link-local addresses are blocked
+- The AI "summarize" step is optional and requires an OpenAI-compatible LLM to be configured (see [CLI Flags](#cli-flags))
+
 **Markdown import:**
 - ZIP-based importer for editors and admins
 - Supports Obsidian-style wiki link rewriting on import
@@ -137,10 +142,10 @@ docker run -p 8080:8080 \
     ghcr.io/perber/leafwiki:latest \
     --jwt-secret=yoursecret \
     --admin-password=yourpassword \
-    --allow-insecure=true
+    --allow-insecure=true --no-tls
 ```
 
-`--allow-insecure=true` is required for plain HTTP. Omit it when serving over HTTPS (make sure your reverse proxy forwards `X-Forwarded-Proto: https`).
+`--no-tls --allow-insecure=true` serves plain HTTP (cookies over plain HTTP). Omit both when serving over HTTPS (the default; make sure your reverse proxy forwards `X-Forwarded-Proto: https`).
 
 **Non-root:**
 
@@ -151,7 +156,7 @@ docker run -p 8080:8080 \
     ghcr.io/perber/leafwiki:latest \
     --jwt-secret=yoursecret \
     --admin-password=yourpassword \
-    --allow-insecure=true
+    --allow-insecure=true --no-tls
 ```
 
 The data directory must be writable by the specified user.
@@ -169,7 +174,7 @@ services:
     environment:
       - LEAFWIKI_JWT_SECRET=yourSecret
       - LEAFWIKI_ADMIN_PASSWORD=yourPassword
-      - LEAFWIKI_ALLOW_INSECURE=true  # Required for plain HTTP. Omit for HTTPS (ensure `X-Forwarded-Proto: https` is forwarded).
+      - LEAFWIKI_ALLOW_INSECURE=true  # For plain HTTP. Also set LEAFWIKI_NO_TLS=true. Omit both for HTTPS (ensure `X-Forwarded-Proto: https` is forwarded).
     volumes:
       - ${HOME}/leafwiki-data:/app/data
     restart: unless-stopped
@@ -213,27 +218,27 @@ sudo ./install.sh --non-interactive --env-file ./.env
 
 ```bash
 chmod +x leafwiki
-./leafwiki --jwt-secret=yoursecret --admin-password=yourpassword --allow-insecure=true
+./leafwiki --jwt-secret=yoursecret --admin-password=yourpassword --allow-insecure=true --no-tls
 ```
 
 The server binds to `127.0.0.1:8080` by default. To expose it on the network:
 
 ```bash
-./leafwiki --jwt-secret=yoursecret --admin-password=yourpassword --host=0.0.0.0 --allow-insecure=true
+./leafwiki --jwt-secret=yoursecret --admin-password=yourpassword --host=0.0.0.0 --allow-insecure=true --no-tls
 ```
 
 Default data directory is `./data`. Change with `--data-dir`.
 
 ### Build from source
 
-Requires Go and Node.js. `make build` compiles the UI, embeds it, and produces a self-contained `leafwiki` binary (same as release/Docker builds). Use HTTP (`http://localhost:8080/`), not HTTPS, unless you terminate TLS in front of LeafWiki.
+Requires Go and Node.js. `make build` compiles the UI, embeds it, and produces a self-contained `leafwiki` binary (same as release/Docker builds). Use HTTP (`http://localhost:8080/`), not HTTPS, by passing `--no-tls` (and `--allow-insecure=true` for cookies) unless you terminate TLS in front of LeafWiki.
 
 ```bash
 git clone https://github.com/perber/leafwiki.git
 cd leafwiki
 git switch --detach v0.13.0   # or any tag / main
 make build
-./leafwiki --disable-auth --host=127.0.0.1 --data-dir ./data --allow-insecure=true
+./leafwiki --disable-auth --host=127.0.0.1 --data-dir ./data --allow-insecure=true --no-tls
 ```
 
 For API-only local development with Vite, use `make build-api` (or `make run`) instead — see [Dev Setup](#dev-setup).
@@ -336,7 +341,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 | `--admin-username` | Initial admin username (only applied if no admin exists yet). | `admin` |
 | `--admin-email` | Initial admin email (only applied if no admin exists yet). | `admin@localhost` |
 
-For plain HTTP: add `--allow-insecure=true` so login and CSRF cookies work.
+**Transport:** LeafWiki serves **HTTPS by default** — on first run it generates and persists a self-signed certificate in the data directory (`tls.crt`/`tls.key`), reused across restarts. To serve plain HTTP instead, pass `--no-tls` together with `--allow-insecure=true` so login and CSRF cookies work. To use your own certificate, pass `--tls-cert` and `--tls-key` (both required).
 
 ### CLI Flags
 
@@ -406,6 +411,12 @@ For plain HTTP: add `--allow-insecure=true` so login and CSRF cookies work.
 | `--smtp-insecure-skip-verify`    | Skip TLS certificate verification for SMTP (testing only)               | `false`       | v0.13.0 |
 | `--smtp-timeout`                 | Timeout for a single SMTP send (e.g. `10s`)                             | `10s`         | v0.13.0 |
 | `--public-url`                   | Base URL for links in outgoing email (required when `--smtp-host` is set) | `""`        | v0.13.0 |
+| `--no-tls`                       | ⚠️ Serve plain HTTP instead of the default HTTPS (HTTPS is automatic when no `--tls-cert`/`--tls-key` is given) | `false` | v0.13.0 |
+| `--tls-cert`                     | Path to a TLS certificate file; enables native HTTPS. Requires `--tls-key` | `""` | v0.13.0 |
+| `--tls-key`                      | Path to a TLS private key file; enables native HTTPS. Requires `--tls-cert` | `""` | v0.13.0 |
+| `--llm-base-url`                 | Base URL of an OpenAI-compatible LLM API (e.g. `https://api.openai.com/v1`); enables AI summarize for URL imports | `""` | v0.13.0 |
+| `--llm-api-key`                  | API key for the OpenAI-compatible LLM API                               | `""` | v0.13.0 |
+| `--llm-model`                    | Model name for the OpenAI-compatible LLM API (e.g. `gpt-4o-mini`)       | `""` | v0.13.0 |
 
 > Docker image default: `LEAFWIKI_HOST` is set to `0.0.0.0` automatically by the container entrypoint if neither `--host` nor `LEAFWIKI_HOST` is provided.
 
@@ -480,6 +491,12 @@ For plain HTTP: add `--allow-insecure=true` so login and CSRF cookies work.
 | `LEAFWIKI_SMTP_INSECURE_SKIP_VERIFY`   | Skip TLS certificate verification for SMTP           | `false`       | v0.13.0 |
 | `LEAFWIKI_SMTP_TIMEOUT`                | Timeout for a single SMTP send                       | `10s`         | v0.13.0 |
 | `LEAFWIKI_PUBLIC_URL`                  | Base URL for links in outgoing email (required with `LEAFWIKI_SMTP_HOST`) | `""` | v0.13.0 |
+| `LEAFWIKI_NO_TLS`                      | ⚠️ Serve plain HTTP instead of the default HTTPS               | `false` | v0.13.0 |
+| `LEAFWIKI_TLS_CERT`                    | Path to TLS certificate file; enables native HTTPS (requires `LEAFWIKI_TLS_KEY`) | `""` | v0.13.0 |
+| `LEAFWIKI_TLS_KEY`                     | Path to TLS private key file; enables native HTTPS (requires `LEAFWIKI_TLS_CERT`) | `""` | v0.13.0 |
+| `LEAFWIKI_LLM_BASE_URL`                | Base URL of OpenAI-compatible LLM API; enables AI summarize for URL imports | `""` | v0.13.0 |
+| `LEAFWIKI_LLM_API_KEY`                 | API key for the OpenAI-compatible LLM API                       | `""` | v0.13.0 |
+| `LEAFWIKI_LLM_MODEL`                   | Model name for the OpenAI-compatible LLM API (e.g. `gpt-4o-mini`) | `""` | v0.13.0 |
 
 ### Custom Stylesheet
 
