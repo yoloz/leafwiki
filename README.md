@@ -311,7 +311,7 @@ npm run dev
 **Terminal 2 — Backend:**
 ```bash
 cd cmd/leafwiki
-go run . --jwt-secret=yoursecret --allow-insecure=true --admin-password=yourpassword
+go run . --jwt-secret=yoursecret --allow-insecure=true --admin-password=yourpassword --no-tls
 ```
 
 Vite starts on `http://localhost:5173`. The backend binds to `127.0.0.1` by default.

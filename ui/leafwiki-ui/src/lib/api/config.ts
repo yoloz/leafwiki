@@ -42,6 +42,8 @@ export type Config = {
   logoutUrl: string
   userManagementUrl: string
   defaultLanguage: string
+  // Whether an OpenAI-compatible LLM is configured (enables "AI summarize" of imported content).
+  llmConfigured: boolean
 }
 
 export async function getConfig(): Promise<Config> {

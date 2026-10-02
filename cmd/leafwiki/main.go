@@ -1,12 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -32,6 +40,7 @@ import (
 	httpinternal "github.com/perber/wiki/internal/http"
 	httpmetrics "github.com/perber/wiki/internal/http/metrics"
 	authmw "github.com/perber/wiki/internal/http/middleware/auth"
+	"github.com/perber/wiki/internal/llm"
 	"github.com/perber/wiki/internal/publicaccess"
 	"github.com/perber/wiki/internal/restore"
 	"github.com/perber/wiki/internal/snapshot"
@@ -115,11 +124,65 @@ func main() {
 	// happen before there is a configured logger - they are CLI diagnostics, so
 	// they go to stderr as plain text. Anything that fails once the logger is up
 	// logs itself and returns errLogged.
+	// Load a .env from the data directory into the process environment so that
+	// auto-generated secrets (and any user edits) apply on every start, not just
+	// the first. Must run before flag parsing, which urfave/cli does in Run.
+	loadDotEnv()
 	if err := newRootCommand().Run(context.Background(), os.Args); err != nil {
 		if !errors.Is(err, errLogged) && !errors.Is(err, errReported) {
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
 		os.Exit(1)
+	}
+}
+
+// resolveDataDirFromArgs finds the configured data directory before the full
+// flag set is parsed, so the .env living there can be loaded. It checks the
+// LEAFWIKI_DATA_DIR env var, then a --data-dir flag, falling back to ./data.
+func resolveDataDirFromArgs() string {
+	if v := strings.TrimSpace(os.Getenv("LEAFWIKI_DATA_DIR")); v != "" {
+		return v
+	}
+	args := os.Args[1:]
+	for i, a := range args {
+		if a == "--data-dir" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if strings.HasPrefix(a, "--data-dir=") {
+			return strings.TrimPrefix(a, "--data-dir=")
+		}
+	}
+	return "./data"
+}
+
+// loadDotEnv reads <data-dir>/.env (if present) and exports each KEY=VALUE into
+// the process environment, without overriding variables already set (so an
+// explicit env var or flag still wins). urfave/cli resolves flags from the
+// process environment, so this makes the file effective on restart.
+func loadDotEnv() {
+	envPath := filepath.Join(resolveDataDirFromArgs(), ".env")
+	f, err := os.Open(envPath)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, val, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		val = strings.TrimSpace(val)
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		_ = os.Setenv(key, val)
 	}
 }
 
@@ -155,6 +218,12 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 	}
 	if err := validateListenConfig(cfg.server.unixSocket, cmd.IsSet("host"), cmd.IsSet("port")); err != nil {
 		fail("Invalid listen configuration", "error", err)
+	}
+	if (cfg.server.tlsCert == "") != (cfg.server.tlsKey == "") {
+		fail("Invalid TLS configuration", "error", errors.New("--tls-cert and --tls-key must be set together"))
+	}
+	if cfg.server.noTLS && (cfg.server.tlsCert != "" || cfg.server.tlsKey != "") {
+		fail("Invalid TLS configuration", "error", errors.New("--no-tls cannot be combined with --tls-cert/--tls-key"))
 	}
 
 	if err := validateHTTPRemoteUserConfig(cfg.proxy.enableHTTPRemoteUser, cfg.proxy.trustedProxyIPs); err != nil {
@@ -202,7 +271,7 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		slog.Default().Warn("Authentication disabled. Wiki is publicly accessible without authentication.")
 	}
 
-	if cfg.server.allowInsecure {
+	if cfg.server.allowInsecure && cfg.server.tlsCert == "" {
 		slog.Default().Warn("allow-insecure enabled. Auth cookies may be transmitted over plain HTTP (INSECURE).")
 	}
 
@@ -212,6 +281,30 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 			fail("Failed to create data directory", "error", err)
 		}
 		slog.Default().Info("Data directory created", "path", cfg.server.dataDir)
+	}
+
+	// On first run, materialize a .env in the data directory with the secrets
+	// the server needs (JWT secret, initial admin credentials) and the listen
+	// port. Only writes when the file is absent, so a user-provided .env or
+	// explicit flags/env vars are never clobbered; generated values are also
+	// assigned back into cfg so this process uses them immediately.
+	ensureBootstrapEnvFile(cfg)
+
+	// HTTPS is the default transport. When neither --tls-cert nor --tls-key is
+	// given (and --no-tls is not set), generate and persist a self-signed
+	// certificate in the data directory so it is reused across restarts.
+	if !cfg.server.noTLS && cfg.server.tlsCert == "" && cfg.server.tlsKey == "" {
+		certPath := filepath.Join(cfg.server.dataDir, "tls.crt")
+		keyPath := filepath.Join(cfg.server.dataDir, "tls.key")
+		if err := ensureSelfSignedCert(certPath, keyPath); err != nil {
+			fail("failed to generate self-signed TLS certificate", "error", err)
+		}
+		cfg.server.tlsCert = certPath
+		cfg.server.tlsKey = keyPath
+	}
+
+	if cfg.server.tlsCert != "" {
+		slog.Default().Info("TLS enabled, serving over HTTPS", "cert", cfg.server.tlsCert)
 	}
 
 	publicAccessService := buildPublicAccessService(cmd, cfg)
@@ -270,6 +363,11 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 			InsecureSkipVerify: cfg.email.smtpInsecureSkipVerify,
 			Timeout:            cfg.email.smtpTimeout,
 			PublicURL:          cfg.email.publicURL,
+		},
+		LLM: llm.Config{
+			BaseURL: cfg.server.llmBaseURL,
+			APIKey:  cfg.server.llmAPIKey,
+			Model:   cfg.server.llmModel,
 		},
 		Metrics: metrics,
 	})
@@ -373,6 +471,7 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		SnapshotEnabled:         cfg.backup.snapshot,
 		SMTPEnabled:             smtpEnabled,
 		TOTPAvailable:           w.TOTPService() != nil,
+		LLMConfigured:           w.LLMConfigured(),
 		HTTPRemoteUser: httpinternal.HTTPRemoteUserConfig{
 			Enabled:         cfg.proxy.enableHTTPRemoteUser,
 			HeaderName:      cfg.proxy.httpRemoteUserHeader,
@@ -399,7 +498,7 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 	signal.Notify(shutdownSignals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(shutdownSignals)
 
-	if err := runServer(router, cfg.server.host, cfg.server.port, cfg.server.unixSocket, cfg.server.dataDir, metrics, cfg.metrics.metricsHost, cfg.metrics.metricsPort, w.TriggerResyncAsync, reloadSignals, shutdownSignals); err != nil {
+	if err := runServer(router, cfg.server.host, cfg.server.port, cfg.server.unixSocket, cfg.server.dataDir, cfg.server.tlsCert, cfg.server.tlsKey, metrics, cfg.metrics.metricsHost, cfg.metrics.metricsPort, w.TriggerResyncAsync, reloadSignals, shutdownSignals); err != nil {
 		slog.Default().Error("Failed to start server", "error", err)
 		return errLogged
 	}
@@ -429,6 +528,7 @@ func buildPublicAccessService(cmd *cli.Command, cfg *serverConfig) *publicaccess
 func runServer(
 	router *gin.Engine,
 	host, port, unixSocket, dataDir string,
+	tlsCert, tlsKey string,
 	metrics *httpmetrics.HTTPMetrics,
 	metricsHost, metricsPort string,
 	reload func(),
@@ -456,7 +556,7 @@ func runServer(
 		if err != nil {
 			return err
 		}
-		return serveWithLifecycle(server, listener, nil, reload, reloadSignals, shutdownSignals)
+		return serveWithLifecycle(server, listener, nil, tlsCert, tlsKey, reload, reloadSignals, shutdownSignals)
 	}
 
 	listener, err := listenOnUnixSocket(unixSocket)
@@ -477,7 +577,7 @@ func runServer(
 		"host_port_overridden", true,
 	)
 
-	return serveWithLifecycle(server, listener, cleanup, reload, reloadSignals, shutdownSignals)
+	return serveWithLifecycle(server, listener, cleanup, tlsCert, tlsKey, reload, reloadSignals, shutdownSignals)
 }
 
 func startMetricsServer(metrics *httpmetrics.HTTPMetrics, host, port string) (func(), string, error) {
@@ -759,16 +859,23 @@ func validateListenConfig(unixSocket string, hostSet, portSet bool) error {
 
 // serveWithLifecycle runs the HTTP server while handling live reload signals and
 // graceful shutdown signals. reload is non-blocking (fires a goroutine internally).
+// When tlsCert and tlsKey are both set, the listener serves HTTPS directly.
 func serveWithLifecycle(
 	server *http.Server,
 	listener net.Listener,
 	cleanup func(),
+	tlsCert, tlsKey string,
 	reload func(),
 	reloadSignals, shutdownSignals <-chan os.Signal,
 ) error {
 	serveErrCh := make(chan error, 1)
 	go func() {
-		err := server.Serve(listener)
+		var err error
+		if tlsCert != "" && tlsKey != "" {
+			err = server.ServeTLS(listener, tlsCert, tlsKey)
+		} else {
+			err = server.Serve(listener)
+		}
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil
 		}
@@ -854,4 +961,132 @@ func normalizeBasePath(s string) string {
 		return ""
 	}
 	return "/" + s
+}
+
+// ensureBootstrapEnvFile writes a .env file into the data directory on first
+// run, auto-filling the parameters the server requires: a random JWT secret,
+// the initial admin username/password, and the listen port. It only writes
+// when the file is absent, so an existing .env (or explicit flags/env vars)
+// is never overwritten. Generated values are assigned back into cfg so the
+// current process uses them.
+func ensureBootstrapEnvFile(cfg *serverConfig) {
+	envPath := filepath.Join(cfg.server.dataDir, ".env")
+	if _, err := os.Stat(envPath); err == nil {
+		return
+	}
+
+	lines := []string{
+		"# LeafWiki auto-generated environment file.",
+		"# Edit these values and restart to apply changes. Keep this file private: it contains secrets.",
+		"",
+		"LEAFWIKI_PORT=" + cfg.server.port,
+	}
+
+	if !cfg.auth.disableAuth {
+		if cfg.auth.adminUsername == "" {
+			cfg.auth.adminUsername = "admin"
+		}
+		lines = append(lines, "LEAFWIKI_ADMIN_USERNAME="+cfg.auth.adminUsername)
+
+		if cfg.auth.jwtSecret == "" {
+			secret, err := randomHex(32)
+			if err != nil {
+				fail("failed to generate jwt secret", "error", err)
+			}
+			cfg.auth.jwtSecret = secret
+		}
+		lines = append(lines, "LEAFWIKI_JWT_SECRET="+cfg.auth.jwtSecret)
+
+		if cfg.auth.adminPassword == "" {
+			pw, err := randomHex(12)
+			if err != nil {
+				fail("failed to generate admin password", "error", err)
+			}
+			cfg.auth.adminPassword = pw
+		}
+		lines = append(lines, "LEAFWIKI_ADMIN_PASSWORD="+cfg.auth.adminPassword)
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(envPath, []byte(content), 0600); err != nil {
+		fail("failed to write .env file", "error", err)
+	}
+
+	slog.Default().Info("Generated bootstrap .env file", "path", envPath, "mode", "0600")
+	if !cfg.auth.disableAuth {
+		slog.Default().Info("Auto-generated initial admin credentials",
+			"username", cfg.auth.adminUsername,
+			"password", cfg.auth.adminPassword,
+			"note", "save these now; the password is not recoverable. Change it after first login in Settings.")
+	}
+}
+
+// randomHex returns a hex-encoded string of n cryptographically random bytes.
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// ensureSelfSignedCert writes a self-signed TLS certificate and key to
+// certPath/keyPath if they do not already exist, reusing any existing pair so
+// the fingerprint stays stable across restarts. The certificate covers
+// localhost and the loopback addresses; being self-signed, browsers will show
+// a security warning, which is expected for a locally generated certificate.
+func ensureSelfSignedCert(certPath, keyPath string) error {
+	if _, err := os.Stat(certPath); err == nil {
+		if _, err2 := os.Stat(keyPath); err2 == nil {
+			return nil
+		}
+	}
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("generate serial: %w", err)
+	}
+
+	tmpl := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "LeafWiki", Organization: []string{"LeafWiki"}},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().AddDate(10, 0, 0),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		BasicConstraintsValid: true,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return fmt.Errorf("create certificate: %w", err)
+	}
+
+	certOut, err := os.OpenFile(certPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("write cert: %w", err)
+	}
+	defer certOut.Close()
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
+		return fmt.Errorf("encode cert: %w", err)
+	}
+
+	keyOut, err := os.OpenFile(keyPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("write key: %w", err)
+	}
+	defer keyOut.Close()
+	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)}); err != nil {
+		return fmt.Errorf("encode key: %w", err)
+	}
+
+	slog.Default().Info("Generated self-signed TLS certificate", "cert", certPath, "key", keyPath)
+	return nil
 }

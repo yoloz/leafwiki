@@ -125,5 +125,33 @@
   },
   "historyPage": {
     "backToPage": "返回页面"
+  },
+  "importDialog": {
+    "titleImport": "从 URL 导入页面",
+    "descImport": "抓取公开网页并提取内容。可让 AI 整理后再创建页面。",
+    "urlLabel": "URL",
+    "urlPlaceholder": "https://example.com/article",
+    "urlRequired": "请填写 URL",
+    "parentLabel": "父节点",
+    "parentPlaceholder": "选择父节点",
+    "root": "根",
+    "titleLabel": "标题",
+    "titlePlaceholder": "页面标题",
+    "titleRequired": "请填写标题",
+    "contentLabel": "内容",
+    "contentPlaceholder": "抓取的内容将显示在此处",
+    "fetch": "获取内容",
+    "summarize": "AI 整理",
+    "summarizing": "整理中…",
+    "create": "创建页面",
+    "fetchedToast": "内容已加载，请确认后创建页面。",
+    "fetchError": "抓取页面失败",
+    "summarizeToast": "内容已整理，请确认后创建页面。",
+    "summarizeError": "内容整理失败",
+    "noContent": "尚无内容——请先获取",
+    "slugFailed": "无法根据标题生成 slug",
+    "createdToast": "页面已创建",
+    "createErrorFallback": "创建页面出错",
+    "llmNotConfigured": "AI 整理不可用：请先配置 LLM（Base URL、API Key、Model）"
   }
 }

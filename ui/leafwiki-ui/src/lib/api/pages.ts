@@ -175,7 +175,42 @@ export async function deletePage(
 
   return await fetchWithAuth(`/api/pages/${id}?${params.toString()}`, {
     method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
   })
+}
+
+export type ImportFromURLResult = {
+  title: string
+  content: string
+  // "markdown" when converted, otherwise "text" or "html" for manual cleanup.
+  format?: string
+}
+
+export type SummarizeResult = {
+  content: string
+}
+
+// importPageFromURL fetches a URL via readability and returns extracted content.
+export async function importPageFromURL(
+  url: string,
+): Promise<ImportFromURLResult> {
+  return (await fetchWithAuth(`/api/pages/import-url`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  })) as ImportFromURLResult
+}
+
+// summarizeContent asks the configured LLM to clean up and (if long) summarize
+// already-fetched content, returning improved Markdown.
+export async function summarizeContent(
+  content: string,
+): Promise<SummarizeResult> {
+  return (await fetchWithAuth(`/api/pages/summarize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })) as SummarizeResult
 }
 
 export async function movePage(

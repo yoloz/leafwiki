@@ -36,6 +36,7 @@ type ConfigStore = {
   logoutUrl: string
   userManagementUrl: string
   defaultLanguage: string
+  llmConfigured: boolean
   error: string | null
   loading: boolean
   hasLoaded: boolean
@@ -91,6 +92,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
   logoutUrl: '',
   userManagementUrl: '',
   defaultLanguage: '',
+  llmConfigured: false,
   error: null,
   loading: false,
   hasLoaded: false,
@@ -142,6 +144,7 @@ export const useConfigStore = create<ConfigStore>((set) => ({
           logoutUrl: config.logoutUrl ?? '',
           userManagementUrl: config.userManagementUrl ?? '',
           defaultLanguage: config.defaultLanguage ?? '',
+          llmConfigured: config.llmConfigured ?? false,
           error: null,
           hasLoaded: true,
           configLoadSucceeded: true,

@@ -21,9 +21,11 @@ import (
 	httpmetrics "github.com/perber/wiki/internal/http/metrics"
 	coreimporter "github.com/perber/wiki/internal/importer"
 	"github.com/perber/wiki/internal/links"
+	"github.com/perber/wiki/internal/llm"
 	"github.com/perber/wiki/internal/properties"
 	"github.com/perber/wiki/internal/search"
 	"github.com/perber/wiki/internal/tags"
+	"github.com/perber/wiki/internal/urlimport"
 	"github.com/perber/wiki/internal/usersettings"
 	wikiapikeys "github.com/perber/wiki/internal/wiki/apikeys"
 	wikiassets "github.com/perber/wiki/internal/wiki/assets"
@@ -98,9 +100,16 @@ type Wiki struct {
 	shutdownCancel         context.CancelFunc
 	log                    *slog.Logger
 	metrics                *httpmetrics.HTTPMetrics
+
+	llmCfg llm.Config
 }
 
 const SYSTEM_USER_ID = "system"
+
+// LLMConfigured reports whether an OpenAI-compatible LLM was configured at boot.
+func (w *Wiki) LLMConfigured() bool {
+	return w.llmCfg.Configured()
+}
 
 type WikiOptions struct {
 	StorageDir              string        // Path to storage directory
@@ -119,6 +128,7 @@ type WikiOptions struct {
 	RevisionCoalesceWindow  time.Duration // Window for coalescing rapid successive saves; 0 = disabled
 	TOTPEncryptionKey       string        // Key used to encrypt per-user TOTP secrets at rest; empty disables TOTP self-service
 	SMTP                    email.Config  // SMTP config for password-reset/invite email; SMTP.Enabled()==false disables the feature entirely
+	LLM                     llm.Config    // OpenAI-compatible LLM config; only BaseURL+APIKey+Model all set enables the URL AI-generation feature
 	Metrics                 *httpmetrics.HTTPMetrics
 }
 
@@ -131,6 +141,7 @@ func NewWiki(options *WikiOptions) (*Wiki, error) {
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
 		metrics:        options.Metrics,
+		llmCfg:         options.LLM,
 	}
 	if err := w.initAuth(options); err != nil {
 		return nil, err
@@ -502,6 +513,8 @@ func (w *Wiki) buildPagesRoutes() *wikipages.Routes {
 		AddFavorite:      wikipages.NewAddFavoriteUseCase(w.tree, w.favorites),
 		RemoveFavorite:   wikipages.NewRemoveFavoriteUseCase(w.favorites),
 		ListFavorites:    wikipages.NewListFavoritesUseCase(w.tree, w.favorites, w.log),
+		ImportURL:        wikipages.NewImportURLUseCase(urlimport.New()),
+		Summarize:        wikipages.NewSummarizeUseCase(llm.NewClient(w.llmCfg), w.llmCfg),
 		UserResolver:     w.userResolver,
 		AuthService:      w.auth,
 	})

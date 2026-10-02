@@ -224,6 +224,7 @@ func (r *Routes) handleConfig(ctx httpinternal.RouterContext) gin.HandlerFunc {
 			"snapshotEnabled":          opts.SnapshotEnabled,
 			"smtpEnabled":              opts.SMTPEnabled,
 			"totpAvailable":            opts.TOTPAvailable,
+			"llmConfigured":            opts.LLMConfigured,
 			"httpRemoteUserEnabled":    opts.HTTPRemoteUser.Enabled,
 			"loginUrl":                 opts.LoginURL,
 			"logoutUrl":                opts.LogoutURL,

@@ -125,5 +125,33 @@
   },
   "historyPage": {
     "backToPage": "Retour à la page"
+  },
+  "importDialog": {
+    "titleImport": "Importer une page depuis une URL",
+    "descImport": "Récupérez une page web publique et extrayez son contenu. Laissez éventuellement l'IA le nettoyer, puis créez la page.",
+    "urlLabel": "URL",
+    "urlPlaceholder": "https://example.com/article",
+    "urlRequired": "L'URL est requise",
+    "parentLabel": "Parent",
+    "parentPlaceholder": "Sélectionner un parent",
+    "root": "Racine",
+    "titleLabel": "Titre",
+    "titlePlaceholder": "Titre de la page",
+    "titleRequired": "Le titre est requis",
+    "contentLabel": "Contenu",
+    "contentPlaceholder": "Le contenu récupéré apparaîtra ici",
+    "fetch": "Récupérer le contenu",
+    "summarize": "Résumer avec l'IA",
+    "summarizing": "Résumé…",
+    "create": "Créer la page",
+    "fetchedToast": "Contenu chargé. Vérifiez puis créez la page.",
+    "fetchError": "Échec de la récupération de la page",
+    "summarizeToast": "Contenu résumé. Vérifiez puis créez la page.",
+    "summarizeError": "Échec du résumé du contenu",
+    "noContent": "Pas encore de contenu — récupérez d'abord",
+    "slugFailed": "Impossible de générer un slug à partir du titre",
+    "createdToast": "Page créée",
+    "createErrorFallback": "Erreur lors de la création de la page",
+    "llmNotConfigured": "Résumé par IA indisponible : configurez un LLM (URL de base, clé API et modèle)"
   }
 }

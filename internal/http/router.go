@@ -121,6 +121,7 @@ type RouterOptions struct {
 	SnapshotEnabled         bool                     // Whether full-backup (snapshot) is enabled (surfaced to admin UI via /api/config)
 	SMTPEnabled             bool                     // Whether SMTP (password reset / user invite email) is configured (surfaced to UI via /api/config)
 	TOTPAvailable           bool                     // Whether a TOTP encryption key is configured, i.e. TOTP self-service can be offered (surfaced to UI via /api/config)
+	LLMConfigured           bool                     // Whether an OpenAI-compatible LLM is configured (enables "generate document from URL")
 	HTTPRemoteUser          HTTPRemoteUserConfig     // Reverse-proxy authentication via HTTP header
 	APIKeyService           *coreauth.APIKeyService  // Bearer API-key authentication; nil disables the feature
 	DisableRequestLog       bool                     // Whether to suppress per-request access log lines

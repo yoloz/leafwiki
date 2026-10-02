@@ -125,5 +125,33 @@
   },
   "historyPage": {
     "backToPage": "Back to Page"
+  },
+  "importDialog": {
+    "titleImport": "Import page from URL",
+    "descImport": "Fetch a public web page and extract its content. Optionally let AI clean it up, then create the page.",
+    "urlLabel": "URL",
+    "urlPlaceholder": "https://example.com/article",
+    "urlRequired": "URL is required",
+    "parentLabel": "Parent",
+    "parentPlaceholder": "Select a parent",
+    "root": "Root",
+    "titleLabel": "Title",
+    "titlePlaceholder": "Page title",
+    "titleRequired": "Title is required",
+    "contentLabel": "Content",
+    "contentPlaceholder": "Fetched content will appear here",
+    "fetch": "Fetch content",
+    "summarize": "AI summarize",
+    "summarizing": "Summarizing…",
+    "create": "Create page",
+    "fetchedToast": "Content loaded. Review and create the page.",
+    "fetchError": "Failed to fetch the page",
+    "summarizeToast": "Content summarized. Review and create the page.",
+    "summarizeError": "Failed to summarize the content",
+    "noContent": "No content yet — fetch first",
+    "slugFailed": "Could not generate a slug from the title",
+    "createdToast": "Page created",
+    "createErrorFallback": "Error creating page",
+    "llmNotConfigured": "AI summarize is not available: configure an LLM (base URL, API key and model)"
   }
 }

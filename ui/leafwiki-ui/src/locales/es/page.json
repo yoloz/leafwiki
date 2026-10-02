@@ -125,5 +125,33 @@
   },
   "historyPage": {
     "backToPage": "Volver a la Página"
+  },
+  "importDialog": {
+    "titleImport": "Importar página desde URL",
+    "descImport": "Obtén una página web pública y extrae su contenido. Opcionalmente deja que la IA lo limpie y luego crea la página.",
+    "urlLabel": "URL",
+    "urlPlaceholder": "https://example.com/article",
+    "urlRequired": "La URL es obligatoria",
+    "parentLabel": "Padre",
+    "parentPlaceholder": "Selecciona un padre",
+    "root": "Raíz",
+    "titleLabel": "Título",
+    "titlePlaceholder": "Título de la página",
+    "titleRequired": "El título es obligatorio",
+    "contentLabel": "Contenido",
+    "contentPlaceholder": "El contenido obtenido aparecerá aquí",
+    "fetch": "Obtener contenido",
+    "summarize": "Resumir con IA",
+    "summarizing": "Resumiendo…",
+    "create": "Crear página",
+    "fetchedToast": "Contenido cargado. Revisa y crea la página.",
+    "fetchError": "No se pudo obtener la página",
+    "summarizeToast": "Contenido resumido. Revisa y crea la página.",
+    "summarizeError": "No se pudo resumir el contenido",
+    "noContent": "Aún no hay contenido: obtén primero",
+    "slugFailed": "No se pudo generar un slug a partir del título",
+    "createdToast": "Página creada",
+    "createErrorFallback": "Error al crear la página",
+    "llmNotConfigured": "Resumen con IA no disponible: configura un LLM (URL base, clave de API y modelo)"
   }
 }

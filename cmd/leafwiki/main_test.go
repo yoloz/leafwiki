@@ -800,7 +800,7 @@ func TestServeWithLifecycle_GracefulShutdownWaitsForInFlightRequest(t *testing.T
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- serveWithLifecycle(server, listener, nil, func() {}, reloadSignals, shutdownSignals)
+		runErr <- serveWithLifecycle(server, listener, nil, "", "", func() {}, reloadSignals, shutdownSignals)
 	}()
 
 	respCh := make(chan *http.Response, 1)
@@ -885,7 +885,7 @@ func TestServeWithLifecycle_ReloadSignalTriggersCallbackWithoutStoppingServer(t 
 
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- serveWithLifecycle(server, listener, nil, func() {
+		runErr <- serveWithLifecycle(server, listener, nil, "", "", func() {
 			reloadCalls.Add(1)
 			reloadDone <- struct{}{}
 		}, reloadSignals, shutdownSignals)
@@ -959,7 +959,7 @@ func TestServeWithLifecycle_ShutdownTimeoutStillRunsCleanup(t *testing.T) {
 			case cleanupCalled <- struct{}{}:
 			default:
 			}
-		}, func() {}, reloadSignals, shutdownSignals)
+		}, "", "", func() {}, reloadSignals, shutdownSignals)
 	}()
 
 	go func() {
@@ -1019,7 +1019,7 @@ func TestServeWithLifecycle_ShutdownDoesNotWaitForInFlightReload(t *testing.T) {
 	shutdownSignals := make(chan os.Signal, 1)
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- serveWithLifecycle(server, listener, nil, func() {
+		runErr <- serveWithLifecycle(server, listener, nil, "", "", func() {
 			close(reloadStarted)
 			go func() {
 				<-releaseReload

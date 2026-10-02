@@ -16,6 +16,7 @@ import {
   DeleteUserDialog,
   EditPageMetadataDialog,
   ImagePreviewDialog,
+  ImportUrlDialog,
   LinkInsertDialog,
   MovePageDialog,
   PageQuickSwitcherDialog,
@@ -86,6 +87,7 @@ export const DIALOG_RESTORE_REVISION_CONFIRMATION =
 export const DIALOG_LINK_INSERT = 'link-insert'
 export const DIALOG_WIKILINK_DISAMBIGUATION = 'wikilink-disambiguation'
 export const DIALOG_SHORTCUTS_HELP = 'shortcuts-help'
+export const DIALOG_IMPORT_URL = 'import-url'
 
 dialogRegistry.register({
   type: DIALOG_ADD_PAGE,
@@ -339,5 +341,12 @@ dialogRegistry.register({
         >)}
       />
     )
+  },
+})
+
+dialogRegistry.register({
+  type: DIALOG_IMPORT_URL,
+  render: () => {
+    return <ImportUrlDialog key={DIALOG_IMPORT_URL} />
   },
 })

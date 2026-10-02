@@ -101,6 +101,7 @@
     "loadErrorPrefix": "Erreur : {{error}}",
     "createNewPageTooltip": "Créer une page",
     "createNewSectionTooltip": "Créer une section",
+    "importFromUrlTooltip": "Importer une page depuis une URL",
     "untitledPage": "Page sans titre",
     "convertedToast": "Page convertie avec succès",
     "conflictRetryMessage": "Cette page a été modifiée par un autre utilisateur. Veuillez réessayer.",

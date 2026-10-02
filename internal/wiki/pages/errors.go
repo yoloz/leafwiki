@@ -30,6 +30,8 @@ const (
 	ErrCodePageInvalidRequest    = "page_invalid_request"
 	ErrCodePageInvalidPayload    = "page_invalid_payload"
 	ErrCodePageInvalidTargetKind = "page_invalid_target_kind"
+	ErrCodePageLLMNotConfigured  = "page_llm_not_configured"
+	ErrCodePageImportFailed      = "page_import_failed"
 )
 
 func newPageRootOperationError(operation string) *sharederrors.LocalizedError {
@@ -100,6 +102,14 @@ func respondWithPageError(c *gin.Context, err error) {
 		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageConvertNotAllowed, "Convert operation not allowed", "convert not allowed")
 	case errors.Is(err, tree.ErrInvalidOperation):
 		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageInvalidRequest, err.Error(), "invalid operation")
+	case errors.Is(err, ErrLLMNotConfigured):
+		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageLLMNotConfigured, "LLM is not configured", "llm not configured")
+	case errors.Is(err, ErrSummarizeEmpty):
+		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageInvalidPayload, "Content is required", "content required")
+	case errors.Is(err, ErrImportURLInvalid):
+		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageInvalidPayload, "URL is required", "url required")
+	case errors.Is(err, ErrImportFailed):
+		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageImportFailed, "Failed to fetch the page", "import failed")
 	case errors.Is(err, tree.ErrVersionConflict):
 		respondWithPageStatusError(c, http.StatusConflict, ErrCodePageVersionConflict, "Page was changed by another request", "page was changed by another request")
 	case errors.Is(err, tree.ErrVersionRequired):
@@ -118,7 +128,7 @@ func pageErrorStatus(code string) int {
 	case ErrCodePageHasChildren, ErrCodePageCircularMove, ErrCodePageCannotMoveToSelf, ErrCodePageSlugConflict,
 		ErrCodePageConvertNotAllowed, ErrCodePageRootOperation, ErrCodePageVersionRequired,
 		ErrCodePageMissingPath, ErrCodePageMissingID, ErrCodePageMissingTitle, ErrCodePageInvalidRequest,
-		ErrCodePageInvalidPayload, ErrCodePageInvalidTargetKind:
+		ErrCodePageInvalidPayload, ErrCodePageInvalidTargetKind, ErrCodePageLLMNotConfigured, ErrCodePageImportFailed:
 		return http.StatusBadRequest
 	case ErrCodePageVersionConflict:
 		return http.StatusConflict

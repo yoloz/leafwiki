@@ -44,6 +44,8 @@ type Routes struct {
 	addFavorite      *AddFavoriteUseCase
 	removeFavorite   *RemoveFavoriteUseCase
 	listFavorites    *ListFavoritesUseCase
+	importURL        *ImportURLUseCase
+	summarize        *SummarizeUseCase
 	userResolver     *coreauth.UserResolver
 	authService      *coreauth.AuthService
 }
@@ -71,6 +73,8 @@ type RoutesConfig struct {
 	AddFavorite      *AddFavoriteUseCase
 	RemoveFavorite   *RemoveFavoriteUseCase
 	ListFavorites    *ListFavoritesUseCase
+	ImportURL        *ImportURLUseCase
+	Summarize        *SummarizeUseCase
 	UserResolver     *coreauth.UserResolver
 	AuthService      *coreauth.AuthService
 }
@@ -99,6 +103,8 @@ func NewRoutes(cfg RoutesConfig) *Routes {
 		addFavorite:      cfg.AddFavorite,
 		removeFavorite:   cfg.RemoveFavorite,
 		listFavorites:    cfg.ListFavorites,
+		importURL:        cfg.ImportURL,
+		summarize:        cfg.Summarize,
 		userResolver:     cfg.UserResolver,
 		authService:      cfg.AuthService,
 	}
@@ -137,6 +143,8 @@ func (r *Routes) RegisterRoutes(ctx httpinternal.RouterContext) {
 	authGroup.POST("/pages/ensure", authmw.RequireEditorOrAdmin(), r.handleEnsurePath)
 	authGroup.POST("/pages/convert/:id", authmw.RequireEditorOrAdmin(), r.handleConvert)
 	authGroup.POST("/pages/copy/:id", authmw.RequireEditorOrAdmin(), r.handleCopy)
+	authGroup.POST("/pages/import-url", authmw.RequireEditorOrAdmin(), r.handleImportURL)
+	authGroup.POST("/pages/summarize", authmw.RequireEditorOrAdmin(), r.handleSummarize)
 	if opts.EnableLinkRefactor {
 		authGroup.POST("/pages/:id/refactor/preview", authmw.RequireEditorOrAdmin(), r.handleRefactorPreview)
 		authGroup.POST("/pages/:id/refactor/apply", authmw.RequireEditorOrAdmin(), r.handleRefactorApply)
@@ -263,6 +271,59 @@ func (r *Routes) handleCreate(c *gin.Context) {
 		return
 	}
 	r.respondPage(c, http.StatusCreated, out.Page)
+}
+
+// handleImportURL fetches a URL via readability and returns extracted content
+// (Markdown when possible, otherwise raw text/HTML) for manual saving. It does
+// not create a page.
+func (r *Routes) handleImportURL(c *gin.Context) {
+	var req struct {
+		URL string `json:"url" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageInvalidPayload, errInvalidRequestUserMsg, errInvalidRequestLogMsg)
+		return
+	}
+	user := authmw.MustGetUser(c)
+	if user == nil {
+		return
+	}
+	out, err := r.importURL.Execute(c.Request.Context(), ImportURLInput{UserID: user.ID, URL: req.URL})
+	if err != nil {
+		respondWithPageError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"title":   out.Title,
+		"content": out.Content,
+		"format":  out.Format,
+	})
+}
+
+// handleSummarize asks the configured OpenAI-compatible LLM to clean up and
+// summarize already-fetched content, returning improved Markdown. Returns 400
+// page_llm_not_configured when the LLM is unset, or page_invalid_payload when
+// the content is empty.
+func (r *Routes) handleSummarize(c *gin.Context) {
+	var req struct {
+		Content string `json:"content" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageInvalidPayload, errInvalidRequestUserMsg, errInvalidRequestLogMsg)
+		return
+	}
+	user := authmw.MustGetUser(c)
+	if user == nil {
+		return
+	}
+	out, err := r.summarize.Execute(c.Request.Context(), SummarizeInput{UserID: user.ID, Content: req.Content})
+	if err != nil {
+		respondWithPageError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"content": out.Content,
+	})
 }
 
 func (r *Routes) handleUpdate(c *gin.Context) {

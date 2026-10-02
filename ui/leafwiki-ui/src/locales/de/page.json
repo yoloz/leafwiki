@@ -125,5 +125,33 @@
   },
   "historyPage": {
     "backToPage": "Zurück zur Seite"
+  },
+  "importDialog": {
+    "titleImport": "Seite von URL importieren",
+    "descImport": "Öffentliche Webseite abrufen und Inhalt extrahieren. Optional von der KI bereinigen lassen, dann Seite erstellen.",
+    "urlLabel": "URL",
+    "urlPlaceholder": "https://example.com/article",
+    "urlRequired": "URL ist erforderlich",
+    "parentLabel": "Übergeordnete Seite",
+    "parentPlaceholder": "Übergeordnete Seite auswählen",
+    "root": "Stamm",
+    "titleLabel": "Titel",
+    "titlePlaceholder": "Seitentitel",
+    "titleRequired": "Titel ist erforderlich",
+    "contentLabel": "Inhalt",
+    "contentPlaceholder": "Der abgerufene Inhalt erscheint hier",
+    "fetch": "Inhalt abrufen",
+    "summarize": "KI-Zusammenfassung",
+    "summarizing": "Zusammenfassen…",
+    "create": "Seite erstellen",
+    "fetchedToast": "Inhalt geladen. Prüfen und Seite erstellen.",
+    "fetchError": "Seite konnte nicht abgerufen werden",
+    "summarizeToast": "Inhalt zusammengefasst. Prüfen und Seite erstellen.",
+    "summarizeError": "Inhalt konnte nicht zusammengefasst werden",
+    "noContent": "Noch kein Inhalt – zuerst abrufen",
+    "slugFailed": "Aus dem Titel konnte kein Slug erzeugt werden",
+    "createdToast": "Seite erstellt",
+    "createErrorFallback": "Fehler beim Erstellen der Seite",
+    "llmNotConfigured": "KI-Zusammenfassung nicht verfügbar: LLM konfigurieren (Basis-URL, API-Schlüssel und Modell)"
   }
 }

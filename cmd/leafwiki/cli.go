@@ -26,10 +26,11 @@ const (
 	catGitBackup = "Git backup"
 	catSnapshots = "Snapshots & restore"
 	catEmail     = "Email (SMTP)"
+	catLLM       = "LLM (URL import)"
 )
 
-const rootUsageText = `leafwiki --jwt-secret <SECRET> --admin-password <PASSWORD> [--host <HOST>] [--port <PORT>] [--unix-socket <PATH>] [--data-dir <DIR>]
-leafwiki --disable-auth [--host <HOST>] [--port <PORT>] [--unix-socket <PATH>] [--data-dir <DIR>]
+const rootUsageText = `leafwiki [--host <HOST>] [--port <PORT>] [--no-tls] [--tls-cert <CERT> --tls-key <KEY>] [--unix-socket <PATH>] [--data-dir <DIR>]
+leafwiki --disable-auth [--host <HOST>] [--port <PORT>] [--no-tls] [--tls-cert <CERT> --tls-key <KEY>] [--unix-socket <PATH>] [--data-dir <DIR>]
 leafwiki reset-admin-password
 leafwiki [--data-dir <DIR>] restore-snapshot <path-to-zip>
 leafwiki --help`
@@ -45,7 +46,20 @@ When --snapshot is enabled, live restore-from-snapshot is also available via the
 admin UI (Settings > Full Backup) and gates writes (503) while a restore is
 swapping files. For disaster recovery or migrating a snapshot to a fresh
 instance, use the "restore-snapshot" command instead: run it before starting the
-server against that data directory.`
+server against that data directory.
+
+On first run, if <data-dir>/.env does not exist, LeafWiki writes one there with
+auto-generated secrets (LEAFWIKI_JWT_SECRET, LEAFWIKI_ADMIN_PASSWORD),
+LEAFWIKI_ADMIN_USERNAME (default: admin) and LEAFWIKI_PORT, and prints the admin
+credentials to the log. The file is created once (mode 0600) and never
+overwritten; set the values yourself or pass flags to take over. The password is
+random and not recoverable — change it after first login.
+
+LeafWiki serves HTTPS by default. If neither --tls-cert nor --tls-key is given,
+a self-signed certificate is generated in <data-dir> (tls.crt, tls.key) on first
+run and reused afterwards; pass --tls-cert/--tls-key for your own certificate,
+or --no-tls to serve plain HTTP. Self-signed certificates are not trusted by
+browsers and will show a security warning.`
 
 // serverConfig is every resolved option, grouped the way --help groups them.
 // Each group owns its declarations in its own file, so adding an option means

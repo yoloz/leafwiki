@@ -101,6 +101,7 @@
     "loadErrorPrefix": "错误：{{error}}",
     "createNewPageTooltip": "新建页面",
     "createNewSectionTooltip": "新建章节",
+    "importFromUrlTooltip": "从 URL 导入页面",
     "untitledPage": "未命名页面",
     "convertedToast": "页面转换成功",
     "conflictRetryMessage": "此页面已被其他用户修改，请重试。",

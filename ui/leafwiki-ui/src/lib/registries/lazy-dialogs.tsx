@@ -109,3 +109,8 @@ export const DeleteApiKeyDialog = lazy(() =>
     default: m.DeleteApiKeyDialog,
   })),
 )
+export const ImportUrlDialog = lazy(() =>
+  import('@/features/page/ImportUrlDialog').then((m) => ({
+    default: m.ImportUrlDialog,
+  })),
+)

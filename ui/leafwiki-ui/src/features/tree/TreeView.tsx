@@ -11,7 +11,11 @@ import { TreeViewActionButton } from '@/features/tree/TreeViewActionButton'
 import { ApiLocalizedError, mapApiError } from '@/lib/api/errors'
 import { triggerPull } from '@/lib/api/backup'
 import { NODE_KIND_PAGE, NODE_KIND_SECTION } from '@/lib/api/pages'
-import { DIALOG_ADD_PAGE, DIALOG_SORT_PAGES } from '@/lib/registries'
+import {
+  DIALOG_ADD_PAGE,
+  DIALOG_IMPORT_URL,
+  DIALOG_SORT_PAGES,
+} from '@/lib/registries'
 import { buildViewUrl } from '@/lib/routePath'
 import { useAppMode } from '@/lib/useAppMode'
 import { useIsReadOnly } from '@/lib/useIsReadOnly'
@@ -28,6 +32,7 @@ import {
   ChevronsUp,
   FilePlus,
   FolderPlus,
+  Globe,
   List,
   Loader2,
   MoreHorizontal,
@@ -201,6 +206,17 @@ export default function TreeView() {
                 nodeKind: NODE_KIND_SECTION,
               })
             }
+          />
+          <TreeViewActionButton
+            actionName="import-url"
+            icon={
+              <Globe
+                className="tree-view__action-icon text-brand/70!"
+                size={18}
+              />
+            }
+            tooltip={t('treeActions.importFromUrlTooltip')}
+            onClick={() => openDialog(DIALOG_IMPORT_URL, {})}
           />
         </>
       )}
