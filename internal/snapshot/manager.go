@@ -33,12 +33,26 @@ type SnapshotEntry struct {
 }
 
 type Manager struct {
-	cfg    Config
-	status Status
+	cfg      Config
+	status   Status
+	uploader RemoteUploader
+}
+
+// RemoteUploader uploads a snapshot ZIP to a remote location after it is created.
+// Implementations must be safe to call concurrently and must not block the
+// snapshot pipeline; failures are logged by the caller, not returned.
+type RemoteUploader interface {
+	Upload(zipPath string) error
 }
 
 func NewManager(cfg Config) *Manager {
 	return &Manager{cfg: cfg}
+}
+
+// SetRemoteUploader enables automatic upload of each newly created snapshot to a
+// remote host (e.g. SSH/SCP). Pass nil to disable.
+func (m *Manager) SetRemoteUploader(u RemoteUploader) {
+	m.uploader = u
 }
 
 // TriggerSnapshot starts a snapshot job asynchronously.
@@ -79,9 +93,22 @@ func (m *Manager) runOnceLocked(ctx context.Context) (err error) {
 		}
 	}()
 
-	if _, createErr := createSnapshot(ctx, m.cfg); createErr != nil {
+	id, createErr := createSnapshot(ctx, m.cfg)
+	if createErr != nil {
 		m.status.SetError(createErr.Error())
 		return createErr
+	}
+
+	// Best-effort remote upload: never block snapshot creation or fail the local
+	// backup. The just-created zip is the newest retention entry, so pruning
+	// (run below) will never delete it before the upload reads it.
+	if m.uploader != nil {
+		zipPath := filepath.Join(m.cfg.BackupsDir, id+".zip")
+		go func() {
+			if err := m.uploader.Upload(zipPath); err != nil {
+				slog.Error("snapshot remote upload failed", "path", zipPath, "error", err)
+			}
+		}()
 	}
 
 	var pruneErrMsg string

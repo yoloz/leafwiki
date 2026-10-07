@@ -413,6 +413,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 | `--snapshot-interval`            | Snapshot interval (e.g. `24h`, `6h`); `0` = manual-only                 | `24h`         | v0.12.0 |
 | `--snapshot-retention`           | Number of most recent snapshots to keep; `<= 0` = keep all             | `10`          | v0.12.0 |
 | `--snapshot-dir`                 | Directory to store snapshot ZIPs in                                     | `<data-dir>/snapshots` | v0.12.0 |
+| `--snapshot-ssh-host`            | SSH host to upload each snapshot to (enables SSH upload with user + key) | `""` | v0.14.0 |
+| `--snapshot-ssh-port`            | SSH port for snapshot upload                                            | `22`          | v0.14.0 |
+| `--snapshot-ssh-user`            | SSH user for snapshot upload (public key must be in `~/.ssh/authorized_keys` on the remote) | `""` | v0.14.0 |
+| `--snapshot-ssh-key-path`        | Path to the SSH **private** key file for upload (never embed the key in `.env`) | `""` | v0.14.0 |
+| `--snapshot-ssh-key-passphrase`  | Optional passphrase for an encrypted private key                        | `""`          | v0.14.0 |
+| `--snapshot-ssh-known-hosts`     | `known_hosts` file for host key verification (MITM protection; required unless insecure) | `""` | v0.14.0 |
+| `--snapshot-ssh-insecure`        | Skip host key verification (INSECURE)                                  | `false`       | v0.14.0 |
+| `--snapshot-ssh-remote-path`      | Absolute destination path on the remote (e.g. `/home/<user>/leafwiki-backup.zip`); a fixed path = overwrite previous; parent dir must exist | `/home/<user>/leafwiki-backup.zip` | v0.14.0 |
 | `--restore-upload-max-size`      | Max size for an uploaded backup ZIP to restore from                    | `500MiB`      | v0.12.0 |
 | `--git-backup`                   | ⚗️ Enable git backup to a remote repository                             | `false`       | v0.11.3 |
 | `--git-backup-remote`            | ⚗️ SSH remote URL for git backup (e.g. `git@github.com:user/repo.git`) | `""` | v0.11.3 |
@@ -493,6 +501,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 | `LEAFWIKI_SNAPSHOT_INTERVAL`            | Snapshot interval; `0` = manual-only                 | `24h`         | v0.12.0 |
 | `LEAFWIKI_SNAPSHOT_RETENTION`           | Number of most recent snapshots to keep; `<= 0` = keep all | `10`   | v0.12.0 |
 | `LEAFWIKI_SNAPSHOT_DIR`                 | Directory to store snapshot ZIPs in                  | `<data-dir>/snapshots` | v0.12.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_HOST`            | SSH host to upload each snapshot to                  | `""`          | v0.14.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_PORT`            | SSH port for snapshot upload                         | `22`          | v0.14.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_USER`            | SSH user for upload (public key in remote `~/.ssh/authorized_keys`) | `""` | v0.14.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_KEY_PATH`        | Path to the SSH **private** key file                 | `""`          | v0.14.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_KEY_PASSPHRASE`  | Optional passphrase for an encrypted private key      | `""`          | v0.14.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_KNOWN_HOSTS`     | `known_hosts` file for host verification             | `""`          | v0.14.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_INSECURE`        | Skip host key verification (INSECURE)                | `false`       | v0.14.0 |
+| `LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH`     | Absolute destination path on the remote              | `/home/<user>/leafwiki-backup.zip` | v0.14.0 |
 | `LEAFWIKI_RESTORE_UPLOAD_MAX_SIZE`      | Max size for an uploaded backup ZIP to restore from  | `500MiB`      | v0.12.0 |
 | `LEAFWIKI_GIT_BACKUP`                   | ⚗️ Enable git backup                                | `false`       | v0.11.3 |
 | `LEAFWIKI_GIT_BACKUP_REMOTE`            | ⚗️ SSH remote URL                                   | `""`          | v0.11.3 |
@@ -680,6 +696,52 @@ On GitHub, create a **fine-grained personal access token** limited to the backup
 - This backs up **content only** — the SQLite database is not included. For a full backup, use your data directory (`cp -r` with the app stopped).
 - When LeafWiki first connects to a remote that already contains a backup, it syncs that content into the local data directory before the wiki loads its pages (local files always win — nothing is overwritten). A new instance therefore picks up the backed-up pages instead of overwriting the remote with an empty wiki, and it does not seed its default welcome page when the backup already has content. After that first sync, backups behave normally, including committing deletions.
 - `--git-backup-path` (e.g. `docs`) commits `root/` and `assets/` under that directory instead of the top level — `docs` produces `docs/root/` and `docs/assets/` — and pulls external edits back from there. This is handy when the backup remote is a monorepo: files outside the configured directory are left untouched. LeafWiki's live content still lives in `<data-dir>/root` and `<data-dir>/assets`; nothing is copied into the repository working tree. Leave it empty to keep the historical top-level layout.
+
+---
+
+### Snapshot SSH upload
+
+> Copies every snapshot ZIP to a remote host over SCP (pure-Go client, private-key auth). This is independent of Git Backup — it ships the same ZIP you'd download from *Settings → Full Backup* to an off-box location for safekeeping.
+
+The upload fires after **every** snapshot is created (scheduled, manual, and the one taken on startup). Each upload writes to a **fixed remote filename** (`/home/<user>/<remote-name>`), so the remote keeps only the latest copy. A failed upload is logged as a warning and never blocks or invalidates the local snapshot.
+
+Enabled when `LEAFWIKI_SNAPSHOT_SSH_HOST` + `LEAFWIKI_SNAPSHOT_SSH_USER` + `LEAFWIKI_SNAPSHOT_SSH_KEY_PATH` are all set. Any other (missing/invalid) SSH config only disables the upload — LeafWiki still runs. If neither `LEAFWIKI_SNAPSHOT_SSH_KNOWN_HOSTS` nor `LEAFWIKI_SNAPSHOT_SSH_INSECURE=true` is set, the upload is disabled (host key can't be verified).
+
+**Environment variables:** `LEAFWIKI_SNAPSHOT_SSH_HOST`, `LEAFWIKI_SNAPSHOT_SSH_PORT` (default `22`), `LEAFWIKI_SNAPSHOT_SSH_USER`, `LEAFWIKI_SNAPSHOT_SSH_KEY_PATH` (private key **file path** — never embed the key), `LEAFWIKI_SNAPSHOT_SSH_KEY_PASSPHRASE` (optional), `LEAFWIKI_SNAPSHOT_SSH_KNOWN_HOSTS` (recommended), `LEAFWIKI_SNAPSHOT_SSH_INSECURE` (default `false`), `LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH` (absolute path on the remote, default `/home/<user>/leafwiki-backup.zip`). See the [CLI Flags](#cli-flags) and [Environment Variables](#environment-variables) tables for the flag equivalents.
+
+#### Setting up the remote (one-time)
+
+1. **Generate a keypair on the LeafWiki host** (ed25519):
+   ```bash
+   ssh-keygen -t ed25519 -f ./leafwiki_ssh_key -N ""   # produces leafwiki_ssh_key (private) + leafwiki_ssh_key.pub (public)
+   ```
+2. **Install the public key on the remote** so LeafWiki can log in without a password:
+   ```bash
+   ssh-copy-id -i ./leafwiki_ssh_key.pub user@remote-host
+   # or manually append leafwiki_ssh_key.pub to remote ~/.ssh/authorized_keys
+   ```
+3. **(Recommended) Capture the remote host key** into a `known_hosts` file for MITM protection:
+   ```bash
+   ssh-keyscan -t ed25519 remote-host >> ./leafwiki_known_hosts
+   ```
+4. **Configure LeafWiki** (`.env` — note the private key stays on the LeafWiki side; the public key went to the remote):
+   ```bash
+   LEAFWIKI_SNAPSHOT_SSH_HOST=remote-host
+   LEAFWIKI_SNAPSHOT_SSH_USER=user
+   LEAFWIKI_SNAPSHOT_SSH_KEY_PATH=/path/to/leafwiki_ssh_key
+   LEAFWIKI_SNAPSHOT_SSH_KNOWN_HOSTS=/path/to/leafwiki_known_hosts
+   # Optional: change the remote destination (default /home/user/leafwiki-backup.zip)
+   LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH=/home/user/leafwiki-backup.zip
+   ```
+5. Start (or restart) LeafWiki. The next snapshot shows `snapshot SSH upload enabled` in the logs, and each snapshot lands at `/home/user/leafwiki-backup.zip` on the remote.
+
+**Notes:**
+
+- The remote host must have an `scp` binary (standard on Linux/macOS). The *client* side is pure Go and needs no `scp` on the LeafWiki host.
+- `LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH` is an **absolute** path, defaulting to `/home/<user>/leafwiki-backup.zip`. Its parent directory must already exist on the remote — `scp` does not create directories, so create e.g. `/home/user/backups` first if you point the path into a subfolder.
+- Use a fixed remote path so the remote retains only the latest snapshot. To keep more history remotely, rotate the path (e.g. include a date) — but then prune them yourself, as LeafWiki's retention only governs the local `snapshots/` directory.
+- `LEAFWIKI_SNAPSHOT_SSH_INSECURE=true` skips host-key verification; only use it on trusted networks, since it exposes uploads to man-in-the-middle interception.
+- The snapshot still excludes `.env` and TLS keys (see [Backup & restore overview](#backup--restore-overview)); copy those separately if you need a fully off-box restore.
 
 ---
 

@@ -44,6 +44,7 @@ import (
 	"github.com/perber/wiki/internal/publicaccess"
 	"github.com/perber/wiki/internal/restore"
 	"github.com/perber/wiki/internal/snapshot"
+	"github.com/perber/wiki/internal/snapshot/sshupload"
 	"github.com/perber/wiki/internal/tocdisplay"
 	"github.com/perber/wiki/internal/wiki"
 	wikibackup "github.com/perber/wiki/internal/wiki/backup"
@@ -425,6 +426,31 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		snapshotScheduler := snapshot.NewScheduler(snapshotManager)
 		defer snapshotScheduler.Stop()
 		w.SetSnapshotRoutes(wikisnapshot.NewRoutes(snapshotManager, snapshotScheduler, w.AuthService(), cfg.backup.snapshotRetention))
+
+		// Optional SSH/SCP upload of each snapshot to a remote host. Missing or
+		// invalid config only disables the upload; it never blocks the server.
+		if cfg.backup.snapshotSSHHost != "" {
+			uploader, err := sshupload.New(sshupload.Config{
+				Host:          cfg.backup.snapshotSSHHost,
+				Port:          cfg.backup.snapshotSSHPort,
+				User:          cfg.backup.snapshotSSHUser,
+				KeyPath:       cfg.backup.snapshotSSHKeyPath,
+				KeyPassphrase: cfg.backup.snapshotSSHKeyPassphrase,
+				KnownHosts:    cfg.backup.snapshotSSHKnownHosts,
+				Insecure:      cfg.backup.snapshotSSHInsecure,
+				RemotePath:    cfg.backup.snapshotSSHRemotePath,
+			})
+			if err != nil {
+				slog.Default().Warn("snapshot SSH upload disabled", "reason", err)
+			} else {
+				snapshotManager.SetRemoteUploader(uploader)
+				remote := cfg.backup.snapshotSSHRemotePath
+				if remote == "" {
+					remote = "/home/" + cfg.backup.snapshotSSHUser + "/leafwiki-backup.zip"
+				}
+				slog.Default().Info("snapshot SSH upload enabled", "remote", remote)
+			}
+		}
 
 		writeGate = restore.NewWriteGate()
 		restoreManager := restore.NewManager(restore.Config{

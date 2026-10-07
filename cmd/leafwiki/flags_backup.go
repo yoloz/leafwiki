@@ -8,23 +8,31 @@ import (
 
 // backupOptions holds the options for git backup, snapshots and restore.
 type backupOptions struct {
-	gitBackup              bool
-	gitBackupAuthorName    string
-	gitBackupAuthorEmail   string
-	gitBackupRemote        string
-	gitBackupBranch        string
-	gitBackupPath          string
-	gitBackupSSHKeyPath    string
-	gitBackupSSHKey        string
-	gitBackupSSHKnownHosts string
-	gitBackupHTTPUsername  string
-	gitBackupHTTPPassword  string
-	gitBackupInterval      time.Duration
-	snapshot               bool
-	snapshotInterval       time.Duration
-	snapshotRetention      int
-	snapshotDir            string
-	restoreUploadMaxSize   string
+	gitBackup                bool
+	gitBackupAuthorName      string
+	gitBackupAuthorEmail     string
+	gitBackupRemote          string
+	gitBackupBranch          string
+	gitBackupPath            string
+	gitBackupSSHKeyPath      string
+	gitBackupSSHKey          string
+	gitBackupSSHKnownHosts   string
+	gitBackupHTTPUsername    string
+	gitBackupHTTPPassword    string
+	gitBackupInterval        time.Duration
+	snapshot                 bool
+	snapshotInterval         time.Duration
+	snapshotRetention        int
+	snapshotDir              string
+	snapshotSSHHost          string
+	snapshotSSHPort          string
+	snapshotSSHUser          string
+	snapshotSSHKeyPath       string
+	snapshotSSHKeyPassphrase string
+	snapshotSSHKnownHosts    string
+	snapshotSSHInsecure      bool
+	snapshotSSHRemotePath    string
+	restoreUploadMaxSize     string
 }
 
 // Flags declares them. Adding an option here is the whole change: the flag,
@@ -164,6 +172,70 @@ func (o *backupOptions) Flags() []cli.Flag {
 			Usage:       "directory to store snapshot ZIPs in",
 			DefaultText: "<data-dir>/snapshots",
 			Sources:     envVars("LEAFWIKI_SNAPSHOT_DIR"),
+			Config:      trimmed,
+		},
+		&cli.StringFlag{
+			Name:        "snapshot-ssh-host",
+			Destination: &o.snapshotSSHHost,
+			Category:    catSnapshots,
+			Usage:       "SSH host to upload snapshots to after each snapshot; enables SSH upload when set together with --snapshot-ssh-user and --snapshot-ssh-key-path",
+			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_HOST"),
+			Config:      trimmed,
+		},
+		&cli.StringFlag{
+			Name:        "snapshot-ssh-port",
+			Destination: &o.snapshotSSHPort,
+			Category:    catSnapshots,
+			Usage:       "SSH port for snapshot upload",
+			Value:       "22",
+			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_PORT"),
+			Config:      trimmed,
+		},
+		&cli.StringFlag{
+			Name:        "snapshot-ssh-user",
+			Destination: &o.snapshotSSHUser,
+			Category:    catSnapshots,
+			Usage:       "SSH user for snapshot upload (private key auth; the public key must be in this user's ~/.ssh/authorized_keys on the remote)",
+			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_USER"),
+			Config:      trimmed,
+		},
+		&cli.StringFlag{
+			Name:        "snapshot-ssh-key-path",
+			Destination: &o.snapshotSSHKeyPath,
+			Category:    catSnapshots,
+			Usage:       "path to the SSH private key for snapshot upload (file path only; never embed the key in .env)",
+			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_KEY_PATH"),
+			Config:      trimmed,
+		},
+		&cli.StringFlag{
+			Name:        "snapshot-ssh-key-passphrase",
+			Destination: &o.snapshotSSHKeyPassphrase,
+			Category:    catSnapshots,
+			Usage:       "optional passphrase for an encrypted SSH private key",
+			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_KEY_PASSPHRASE"),
+			Config:      trimmed,
+		},
+		&cli.StringFlag{
+			Name:        "snapshot-ssh-known-hosts",
+			Destination: &o.snapshotSSHKnownHosts,
+			Category:    catSnapshots,
+			Usage:       "known_hosts file for SSH host key verification (MITM protection); required unless --snapshot-ssh-insecure is set",
+			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_KNOWN_HOSTS"),
+			Config:      trimmed,
+		},
+		&cli.BoolFlag{
+			Name:        "snapshot-ssh-insecure",
+			Destination: &o.snapshotSSHInsecure,
+			Category:    catSnapshots,
+			Usage:       "skip SSH host key verification for snapshot upload (INSECURE: exposes uploads to man-in-the-middle attacks)",
+			Sources:     envBoolVars("LEAFWIKI_SNAPSHOT_SSH_INSECURE"),
+		},
+		&cli.StringFlag{
+			Name:        "snapshot-ssh-remote-path",
+			Destination: &o.snapshotSSHRemotePath,
+			Category:    catSnapshots,
+			Usage:       "absolute destination path on the remote for the snapshot ZIP (e.g. /home/<user>/leafwiki-backup.zip); a fixed path means each upload overwrites the previous one; the parent directory must already exist on the remote",
+			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH"),
 			Config:      trimmed,
 		},
 		&cli.StringFlag{
