@@ -185,6 +185,9 @@ func loadDotEnv() {
 		}
 		_ = os.Setenv(key, val)
 	}
+	if err := sc.Err(); err != nil {
+		fmt.Fprintln(os.Stderr, "Error: failed to read .env file:", err)
+	}
 }
 
 func runResetAdminPasswordCommand(cfg *serverConfig) error {
