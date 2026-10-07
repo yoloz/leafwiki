@@ -35,6 +35,7 @@ docker run -p 8080:8080 -v ~/leafwiki-data:/app/data \
   - [Binary](#binary)
   - [Reset admin password](#reset-admin-password)
   - [Restore a snapshot (offline)](#restore-a-snapshot-offline)
+  - [Backup & restore overview](#backup--restore-overview)
 - [Operating Modes](#operating-modes)
 - [Dev Setup](#dev-setup)
 - [Configuration](#configuration)
@@ -258,6 +259,30 @@ For disaster recovery or migrating to a fresh instance, restore a snapshot ZIP i
 ```
 
 When `--snapshot` is enabled, a live restore is also available from the admin UI (Settings → Full Backup). Use this offline command when the server can't start or you're seeding a new data directory. The `--snapshot*` flags are in [CLI Flags](#cli-flags).
+
+### Backup & restore overview
+
+Everything LeafWiki owns lives in `--data-dir` (default `./data`): page Markdown under `root/`, uploaded files under `assets/`, the SQLite databases (`users.db`, `api_keys.db`, `favorites.db`, `usersettings.db`), and the secret files `.env` (JWT secret + initial admin password) and `tls.crt`/`tls.key` (when using the built-in cert). There are three ways to back this up, and they differ in what they capture:
+
+| Method | Pages (`root/`) | User DB (`*.db`) | `.env` / TLS keys | Best for |
+|--------|:---------------:|:----------------:|:-----------------:|----------|
+| **Full directory copy** (stop the app, `cp -r data data.bak` / `tar czf`) | ✅ | ✅ | ✅ | Whole-instance backup & migration (most complete) |
+| **Snapshot ZIP** (`--snapshot`, admin UI *Full Backup*) | ✅ | ✅ | ❌ | Scheduled automatic backup, disaster recovery |
+| **Git Backup** (`--git-backup`, experimental) | ✅ | ❌ | ❌ | Off-site / versioned content |
+
+**Caveat — what a snapshot ZIP intentionally omits.** A snapshot contains `root/`, `assets/`, `branding/`, `avatars/`, `branding.json`, `schema.json` and the four SQLite DBs `users.db`, `api_keys.db`, `favorites.db`, `usersettings.db` (each copied with `VACUUM INTO` for a consistent copy). The following are **deliberately not** included:
+
+- **Secret files:** `.env` (JWT secret + initial admin password), `tls.crt`/`tls.key`, `public-access.json`, `git-backup.json`, `.leafwikiignore`. If you restore only from a snapshot and `.env` is missing, LeafWiki regenerates a **new JWT secret and a new admin password** on startup (printed once to the log) — all existing sessions expire and the old password is invalidated.
+- **Derived index databases** — `properties.db`, `tags.db`, `links.db`, `search.db`: these are rebuilt automatically after a restore via `TriggerResync` from the restored `root/` + `assets/`, so they are not part of the backup.
+- **`sessions.db`**: ephemeral login-session state, intentionally excluded; all sessions are invalidated after a restore (`InvalidateAllSessions`).
+- **Empty directories produce no ZIP entry.** `assets/`, `branding/` and `avatars/` only appear in the ZIP when they actually contain files. An instance that has never uploaded an attachment or a logo produces a snapshot with *only* `root/` plus the DBs and JSON files — this is expected behavior, **not** data loss. (Verify with `unzip -l <snapshot>.zip`.)
+
+**Recommendation:**
+- *Production / safest:* keep scheduled snapshots **and** separately back up `.env` (plus `tls.crt`/`tls.key` if you use them).
+- *Migrating to another server / full instance move:* a single `tar` of the whole data directory is the cleanest.
+- *Off-site content redundancy:* add Git Backup on top (content only, no databases).
+
+The full `cp -r` cold copy, the offline `restore-snapshot` command, and the Git Backup setup are covered above and under [Git Backup](#git-backup-v0113-experimental).
 
 ---
 
