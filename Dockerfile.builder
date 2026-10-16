@@ -1,5 +1,5 @@
 # Stage 1: Frontend build
-FROM node:26-alpine@sha256:2d984a15c9b54fd0aeb608b8e0d0d83529eb34d2966db27a1fb4f1edc3d298a3 AS frontend
+FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS frontend
 
 WORKDIR /ui
 ARG APP_VERSION
@@ -12,7 +12,7 @@ COPY ./ui/leafwiki-ui/ ./
 RUN VITE_API_URL=/ APP_VERSION=${APP_VERSION} npm run build
 
 # Stage 2: Go backend build
-FROM golang:1.27-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
+FROM golang:1.27-alpine@sha256:8a5910f31396cd4d89662f56c68b3ae31d374308270a1c3bd96672ee5ed43414 AS builder
 
 ARG APP_VERSION
 ARG GOOS
