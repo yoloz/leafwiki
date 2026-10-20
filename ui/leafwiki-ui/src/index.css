@@ -3763,6 +3763,22 @@
       break-inside: avoid;
     }
 
+    /* Disable the decorative quotation marks Tailwind Typography adds to blockquotes */
+    .page-viewer__content blockquote,
+    .page-history__preview-body blockquote,
+    .markdown-editor__preview blockquote {
+      quotes: none;
+    }
+
+    .page-viewer__content blockquote p::before,
+    .page-viewer__content blockquote p::after,
+    .page-history__preview-body blockquote p::before,
+    .page-history__preview-body blockquote p::after,
+    .markdown-editor__preview blockquote p::before,
+    .markdown-editor__preview blockquote p::after {
+      content: none;
+    }
+
     .page-viewer__content :where(img),
     .page-history__preview-body :where(img),
     .markdown-editor__preview :where(img) {
