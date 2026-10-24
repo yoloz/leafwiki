@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -154,6 +155,120 @@ func TestImageFilenameFromURL(t *testing.T) {
 				t.Errorf("imageFilenameFromURL(%q, %q) = %q, want %q", tc.rawURL, tc.contentType, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRewriteLazyImages(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "wechat data-src with placeholder src",
+			in:   `<img data-src="https://mmbiz.qpic.cn/a.jpg" src="data:image/svg+xml,placeholder">`,
+			want: `<img data-src="https://mmbiz.qpic.cn/a.jpg" src="https://mmbiz.qpic.cn/a.jpg">`,
+		},
+		{
+			name: "no data-src is left untouched",
+			in:   `<img src="https://example.com/real.png" alt="x">`,
+			want: `<img src="https://example.com/real.png" alt="x">`,
+		},
+		{
+			name: "img with data-src but no src gets one inserted",
+			in:   `<img data-src="https://example.com/b.png" alt="y">`,
+			want: `<img src="https://example.com/b.png" data-src="https://example.com/b.png" alt="y">`,
+		},
+		{
+			name: "multiple imgs",
+			in:   `<p><img data-src="https://x.com/1.jpg" src="ph"></p><img src="https://x.com/2.png">`,
+			want: `<p><img data-src="https://x.com/1.jpg" src="https://x.com/1.jpg"></p><img src="https://x.com/2.png">`,
+		},
+		{
+			name: "empty data-src is ignored",
+			in:   `<img data-src="" src="https://example.com/ok.png">`,
+			want: `<img data-src="" src="https://example.com/ok.png">`,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := rewriteLazyImages(tc.in); got != tc.want {
+				t.Errorf("rewriteLazyImages(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractWeChatContent(t *testing.T) {
+	t.Parallel()
+
+	page := `<!doctype html><html><head><meta property="og:title" content="我的文章"><title>我的文章</title></head>` +
+		`<body>` +
+		`<div id="js_content"><p>正文第一段</p><p>正文第二段</p>` +
+		`<img data-src="https://mmbiz.qpic.cn/a.jpg" src="data:image/svg+xml,ph"></div>` +
+		`<div id="footer">阅读原文 不喜欢</div>` +
+		`</body></html>`
+
+	inner, ok := extractWeChatContent(page)
+	if !ok {
+		t.Fatal("expected to find js_content")
+	}
+	if !strings.Contains(inner, "正文第一段") || !strings.Contains(inner, "正文第二段") {
+		t.Errorf("js_content missing body text: %q", inner)
+	}
+	if strings.Contains(inner, "阅读原文") {
+		t.Errorf("js_content leaked footer: %q", inner)
+	}
+	if !strings.Contains(inner, `src="https://mmbiz.qpic.cn/a.jpg"`) {
+		t.Errorf("lazy image not promoted: %q", inner)
+	}
+}
+
+func TestExtractWeChatContentFallbackClass(t *testing.T) {
+	t.Parallel()
+
+	page := `<div class="rich_media_content"><p>通过 class 命中的正文</p></div>`
+	inner, ok := extractWeChatContent(page)
+	if !ok || !strings.Contains(inner, "通过 class 命中的正文") {
+		t.Errorf("class fallback failed: ok=%v inner=%q", ok, inner)
+	}
+}
+
+func TestWeChatTitle(t *testing.T) {
+	t.Parallel()
+
+	page := `<html><head><meta property="og:title" content="OG标题"><title>文档标题</title></head></html>`
+	if got := weChatTitle(page, "fallback"); got != "OG标题" {
+		t.Errorf("weChatTitle = %q, want OG标题", got)
+	}
+
+	noOg := `<html><head><title>仅标题</title></head></html>`
+	if got := weChatTitle(noOg, "fallback"); got != "仅标题" {
+		t.Errorf("weChatTitle (no og) = %q, want 仅标题", got)
+	}
+}
+
+func TestIsWeChatHost(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"mp.weixin.qq.com", true},
+		{"weixin.qq.com", true},
+		{"example.com", false},
+		{"mp.weixin.qq.com.evil.com", false},
+	}
+	for _, tc := range cases {
+		if got := isWeChatHost(tc.host); got != tc.want {
+			t.Errorf("isWeChatHost(%q) = %v, want %v", tc.host, got, tc.want)
+		}
 	}
 }
 

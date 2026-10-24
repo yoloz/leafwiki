@@ -14,15 +14,22 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
 	readability "codeberg.org/readeck/go-readability/v2"
 	md "github.com/JohannesKaufmann/html-to-markdown"
+	"golang.org/x/net/html"
 )
 
 const maxResponseBytes = 10 << 20 // 10 MiB
 const maxImageBytes = 10 << 20    // 10 MiB
+
+// browserUserAgent is a realistic desktop-browser UA. Some sites (notably
+// WeChat official-account articles) block or downgrade responses for obvious
+// bot UAs, so we identify as a browser.
+const browserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 // Importer fetches and extracts web page content.
 type Importer struct {
@@ -108,7 +115,7 @@ func (i *Importer) Fetch(ctx context.Context, rawURL string) (body []byte, conte
 	if err != nil {
 		return nil, "", "", err
 	}
-	req.Header.Set("User-Agent", "leafwiki-url-importer/1.0")
+	req.Header.Set("User-Agent", browserUserAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.5")
 
 	resp, err := i.client.Do(req)
@@ -158,7 +165,7 @@ func (i *Importer) FetchImage(ctx context.Context, rawURL string, referer string
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "leafwiki-url-importer/1.0")
+	req.Header.Set("User-Agent", browserUserAgent)
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/png,image/jpeg,image/gif,image/svg+xml,image/*,*/*;q=0.8")
 	if referer != "" {
 		req.Header.Set("Referer", referer)
@@ -266,10 +273,27 @@ func (i *Importer) Extract(ctx context.Context, rawURL string) (*ExtractResult, 
 		return &ExtractResult{Title: finalURL, Content: string(body), Format: "text"}, nil
 	}
 
-	article, err := readability.FromReader(bytes.NewReader(body), mustURL(finalURL))
+	// Normalize lazy-loaded images (e.g. WeChat's <img data-src="real"> with a
+	// placeholder src) so the real image URL ends up in src before extraction.
+	// Harmless for pages that don't use data-src.
+	html := rewriteLazyImages(string(body))
+
+	// WeChat articles keep the real body in a fixed <div id="js_content">, which
+	// go-readability routinely mis-attributes among the heavy page chrome. Pull
+	// that node directly when we recognize a WeChat host.
+	if host := hostOf(finalURL); isWeChatHost(host) {
+		if inner, ok := extractWeChatContent(html); ok {
+			conv := md.NewConverter("", true, nil)
+			if mdStr, convErr := conv.ConvertString(inner); convErr == nil && strings.TrimSpace(mdStr) != "" {
+				return &ExtractResult{Title: weChatTitle(html, finalURL), Content: strings.TrimSpace(mdStr), Format: "markdown"}, nil
+			}
+		}
+	}
+
+	article, err := readability.FromReader(bytes.NewReader([]byte(html)), mustURL(finalURL))
 	if err != nil || article.Node == nil {
 		// Readability could not parse it; return the raw HTML for manual handling.
-		return &ExtractResult{Title: finalURL, Content: string(body), Format: "html"}, nil
+		return &ExtractResult{Title: finalURL, Content: html, Format: "html"}, nil
 	}
 
 	title := article.Title()
@@ -299,4 +323,148 @@ func mustURL(s string) *url.URL {
 		return nil
 	}
 	return u
+}
+
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Host)
+}
+
+func isWeChatHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(host), ".")
+	return host == "weixin.qq.com" || strings.HasSuffix(host, ".weixin.qq.com")
+}
+
+// extractWeChatContent locates the WeChat article body. It looks for the
+// canonical <div id="js_content"> and falls back to an element whose class
+// contains "rich_media_content". The matched node's HTML is returned.
+func extractWeChatContent(htmlStr string) (string, bool) {
+	doc, err := html.Parse(strings.NewReader(htmlStr))
+	if err != nil {
+		return "", false
+	}
+	node := findNode(doc, func(n *html.Node) bool {
+		if n.Type != html.ElementNode {
+			return false
+		}
+		for _, a := range n.Attr {
+			if a.Key == "id" && a.Val == "js_content" {
+				return true
+			}
+			if a.Key == "class" && hasToken(a.Val, "rich_media_content") {
+				return true
+			}
+		}
+		return false
+	})
+	if node == nil {
+		return "", false
+	}
+	var buf bytes.Buffer
+	if err := html.Render(&buf, node); err != nil {
+		return "", false
+	}
+	return buf.String(), true
+}
+
+func findNode(n *html.Node, pred func(*html.Node) bool) *html.Node {
+	if pred(n) {
+		return n
+	}
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if found := findNode(c, pred); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func hasToken(s, token string) bool {
+	for _, t := range strings.Fields(s) {
+		if t == token {
+			return true
+		}
+	}
+	return false
+}
+
+// weChatTitle prefers the Open Graph title, then the document <title>, then the
+// supplied fallback.
+func weChatTitle(htmlStr, fallback string) string {
+	doc, err := html.Parse(strings.NewReader(htmlStr))
+	if err != nil {
+		return fallback
+	}
+	var ogTitle, title string
+	var walk func(*html.Node)
+	walk = func(n *html.Node) {
+		if n.Type == html.ElementNode {
+			switch n.Data {
+			case "meta":
+				var key, val string
+				for _, a := range n.Attr {
+					if a.Key == "property" {
+						key = a.Val
+					}
+					if a.Key == "content" {
+						val = a.Val
+					}
+				}
+				if key == "og:title" && val != "" {
+					ogTitle = val
+				}
+			case "title":
+				if n.FirstChild != nil {
+					title = n.FirstChild.Data
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	if ogTitle != "" {
+		return strings.TrimSpace(ogTitle)
+	}
+	if title != "" {
+		return strings.TrimSpace(title)
+	}
+	return fallback
+}
+
+var (
+	imgTagRe  = regexp.MustCompile(`(?is)<img\b[^>]*>`)
+	dataSrcRe = regexp.MustCompile(`(?is)\bdata-src\s*=\s*("([^"]*)"|'([^']*)')`)
+	srcAttrRe = regexp.MustCompile(`(?is)(\s)src\s*=\s*("([^"]*)"|'([^']*)')`)
+)
+
+// rewriteLazyImages promotes a lazy-loaded image's data-src attribute to src.
+// Many sites (WeChat among them) render <img data-src="real-url" src="placeholder">
+// and only swap in the real URL via JavaScript. Without this, extraction captures
+// the placeholder. An <img> with no data-src is returned unchanged, so the
+// function is safe to run on every page.
+func rewriteLazyImages(html string) string {
+	return imgTagRe.ReplaceAllStringFunc(html, func(tag string) string {
+		m := dataSrcRe.FindStringSubmatch(tag)
+		if m == nil {
+			return tag
+		}
+		real := m[2]
+		if real == "" {
+			real = m[3]
+		}
+		if real == "" {
+			return tag
+		}
+		real = strings.ReplaceAll(real, `"`, "&quot;")
+		if srcAttrRe.MatchString(tag) {
+			return srcAttrRe.ReplaceAllString(tag, `${1}src="`+real+`"`)
+		}
+		// No src attribute: insert one right after <img.
+		return regexp.MustCompile(`(?is)<img`).ReplaceAllString(tag, `<img src="`+real+`"`)
+	})
 }
