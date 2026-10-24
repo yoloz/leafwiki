@@ -54,5 +54,5 @@ internal/http/dist/*
 
 # local-only AI agent config/docs (never pushed, see CLAUDE.md)
 /CLAUDE.md
-/AGENTS.md
+# /AGENTS.md
 /.claude/
