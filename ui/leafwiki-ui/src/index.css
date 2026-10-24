@@ -15,7 +15,7 @@
 @theme {
   /* Typography + Radii */
   --font-sans:
-    'LXGW WenKai', InterVariable, system-ui, 'Segoe UI Emoji',
+    'Noto Sans SC', InterVariable, system-ui, 'Segoe UI Emoji',
     'Apple Color Emoji', 'Noto Color Emoji', sans-serif;
   --radius: 0.5rem;
   --radius-lg: 0.5rem;
@@ -1822,7 +1822,18 @@
   }
 
   .page-viewer__content {
-    @apply prose prose-base text-page-text dark:prose-invert mt-6 flex-1 max-w-[70ch] break-words;
+    @apply prose prose-base text-page-text dark:prose-invert mt-6 flex-1 max-w-none break-words;
+    font-size: 15px;
+    line-height: 1.9;
+  }
+
+  /* Hard override so the prose plugin's defaults can't win; also widen the
+     paragraph gap to match WeChat's airy spacing. */
+  .page-viewer__content :where(p) {
+    font-size: 15px;
+    line-height: 1.9;
+    margin-top: 1.1em;
+    margin-bottom: 1.1em;
   }
 
   .page-viewer__content :where(h1),
@@ -3739,8 +3750,8 @@
   kbd,
   samp {
     font-family:
-      'LXGW WenKai Mono', ui-monospace, 'SFMono-Regular', 'JetBrains Mono',
-      Menlo, Consolas, 'Liberation Mono', 'LXGW WenKai', monospace !important;
+      'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas,
+      'Liberation Mono', monospace !important;
   }
 }
 
