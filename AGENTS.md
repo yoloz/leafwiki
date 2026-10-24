@@ -46,6 +46,7 @@ Go backend with an embedded React SPA.
 - Design tokens: HSL triplets (`--brand`, `--border`, `--surface-alt`, ...) in `index.css` `:root` / `.dark`; the `.dark` class is toggled by the `designmode` zustand store (`useApplyDesignMode`)
 - Tailwind v4 CSS-first: `@theme` + `@plugin` blocks live in `index.css`; `@tailwindcss/typography` `prose` is the markdown base
 - The CodeMirror 6 editor shares `MarkdownPreview` and the hljs theme CSS with the reading view
+- Body font is LXGW WenKai (+ WenKai Mono for code) served from the jsDelivr CDN: `<link>` tags live in `index.html`, the font stacks in `index.css` (`--font-sans` and the `.code, pre, code` rule)
 - Tests are colocated (`*.test.tsx`), vitest + jsdom
 
 ## Gotchas

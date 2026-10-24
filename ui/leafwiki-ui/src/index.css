@@ -15,8 +15,8 @@
 @theme {
   /* Typography + Radii */
   --font-sans:
-    InterVariable, system-ui, 'Segoe UI Emoji', 'Apple Color Emoji',
-    'Noto Color Emoji', sans-serif;
+    'LXGW WenKai', InterVariable, system-ui, 'Segoe UI Emoji',
+    'Apple Color Emoji', 'Noto Color Emoji', sans-serif;
   --radius: 0.5rem;
   --radius-lg: 0.5rem;
   --radius-md: 0.375rem;
@@ -1822,7 +1822,7 @@
   }
 
   .page-viewer__content {
-    @apply prose prose-base text-page-text dark:prose-invert mt-6 max-w-full flex-1 leading-relaxed break-words;
+    @apply prose prose-base text-page-text dark:prose-invert mt-6 flex-1 max-w-[70ch] break-words;
   }
 
   .page-viewer__content :where(h1),
@@ -1866,7 +1866,7 @@
   .page-viewer__content :where(p),
   .markdown-editor__preview :where(p),
   .page-history__preview-body :where(p) {
-    @apply my-3;
+    @apply my-4;
   }
 
   .page-viewer__content :where(ul, ol),
@@ -2316,6 +2316,20 @@
      Applies to all three markdown preview surfaces (page viewer, editor
      preview, page-history preview). New rules use an :is() group so the
      selector list is not triplicated again. */
+
+  /* Roomier reading metrics: 1.75 line-height and a touch of letter-spacing
+     are the comfortable zone for long-form CJK text (and harmless for
+     Latin). Headings keep their own tighter tracking below. */
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  ) {
+    font-size: 16.5px;
+    line-height: 1.75;
+    letter-spacing: 0.01em;
+  }
+
   :is(
     .page-viewer__content,
     .markdown-editor__preview,
@@ -2347,12 +2361,34 @@
     .page-history__preview-body
   )
     :where(blockquote) {
+    quotes: none;
     border-inline-start-width: 3px;
     border-inline-start-color: hsl(var(--brand) / 0.45);
     background: hsl(var(--surface-alt) / 0.55);
     border-radius: 0 var(--radius-md) var(--radius-md) 0;
     padding: 0.5rem 1rem;
     font-style: normal;
+  }
+
+  /* Remove Tailwind Typography's decorative open/close quotation marks on
+     screen (the print layer has its own copy). The selectors mirror the
+     plugin's `blockquote p:first-of-type::before` / `p:last-of-type::after`
+     rules and out-specify them, so the quotes are gone everywhere. */
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+    blockquote
+    p:first-of-type::before,
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+    blockquote
+    p:last-of-type::after {
+    content: none;
   }
 
   :is(
@@ -3703,9 +3739,8 @@
   kbd,
   samp {
     font-family:
-      ui-monospace, 'SFMono-Regular', 'SF Mono', 'JetBrains Mono',
-      'Cascadia Code', Menlo, Consolas, 'Liberation Mono', 'Courier New',
-      monospace !important;
+      'LXGW WenKai Mono', ui-monospace, 'SFMono-Regular', 'JetBrains Mono',
+      Menlo, Consolas, 'Liberation Mono', 'LXGW WenKai', monospace !important;
   }
 }
 
