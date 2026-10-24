@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 )
 
 const maxResponseBytes = 10 << 20 // 10 MiB
+const maxImageBytes = 10 << 20    // 10 MiB
 
 // Importer fetches and extracts web page content.
 type Importer struct {
@@ -130,6 +132,117 @@ func (i *Importer) Fetch(ctx context.Context, rawURL string) (body []byte, conte
 		final = resp.Request.URL.String()
 	}
 	return data, resp.Header.Get("Content-Type"), final, nil
+}
+
+// FetchedImage is a downloaded image payload ready to be stored as an asset.
+type FetchedImage struct {
+	Data        []byte
+	ContentType string
+	Filename    string
+}
+
+// FetchImage downloads a single image, enforcing the same scheme and SSRF rules
+// as Fetch. The referer is sent as the Referer header to satisfy sites with
+// hotlink protection. Payloads larger than maxImageBytes, empty bodies, and
+// non-image content are rejected.
+func (i *Importer) FetchImage(ctx context.Context, rawURL string, referer string) (*FetchedImage, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid url: %w", err)
+	}
+	if err := assertSafeScheme(u); err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "leafwiki-url-importer/1.0")
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/png,image/jpeg,image/gif,image/svg+xml,image/*,*/*;q=0.8")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+
+	resp, err := i.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch failed: unexpected status %d", resp.StatusCode)
+	}
+
+	limited := io.LimitReader(resp.Body, maxImageBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if int64(len(data)) > maxImageBytes {
+		return nil, fmt.Errorf("image exceeds %d bytes", maxImageBytes)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty image body")
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		// Some servers mislabel images as application/octet-stream; fall back
+		// to sniffing the magic bytes before giving up.
+		contentType = http.DetectContentType(data)
+	}
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		return nil, fmt.Errorf("not an image: content type %q", contentType)
+	}
+
+	final := u
+	if resp.Request != nil && resp.Request.URL != nil {
+		final = resp.Request.URL
+	}
+	return &FetchedImage{
+		Data:        data,
+		ContentType: contentType,
+		Filename:    imageFilenameFromURL(final, contentType),
+	}, nil
+}
+
+// imageFilenameFromURL derives a filename from the URL path, appending or
+// falling back to an extension derived from the content type.
+func imageFilenameFromURL(u *url.URL, contentType string) string {
+	name := path.Base(u.Path)
+	if name == "." || name == "/" || name == ".." {
+		name = ""
+	}
+	ext := path.Ext(name)
+	if name != "" && ext != "" {
+		return name
+	}
+	fallback := "image"
+	if name != "" {
+		fallback = name
+	}
+	return fallback + extensionForContentType(contentType)
+}
+
+// extensionForContentType maps an image content type to a file extension,
+// e.g. "image/svg+xml" -> ".svg". Non-image types fall back to ".img".
+func extensionForContentType(contentType string) string {
+	subtype := strings.ToLower(strings.TrimSpace(contentType))
+	if i := strings.IndexByte(subtype, ';'); i >= 0 {
+		subtype = subtype[:i]
+	}
+	if !strings.HasPrefix(subtype, "image/") {
+		return ".img"
+	}
+	subtype = strings.TrimPrefix(subtype, "image/")
+	if subtype == "" {
+		return ".img"
+	}
+	if i := strings.IndexByte(subtype, '+'); i >= 0 {
+		subtype = subtype[:i]
+	}
+	return "." + subtype
 }
 
 // ExtractResult is the outcome of extracting a page.

@@ -45,6 +45,7 @@ type Routes struct {
 	removeFavorite   *RemoveFavoriteUseCase
 	listFavorites    *ListFavoritesUseCase
 	importURL        *ImportURLUseCase
+	importURLCreate  *ImportURLCreateUseCase
 	summarize        *SummarizeUseCase
 	userResolver     *coreauth.UserResolver
 	authService      *coreauth.AuthService
@@ -74,6 +75,7 @@ type RoutesConfig struct {
 	RemoveFavorite   *RemoveFavoriteUseCase
 	ListFavorites    *ListFavoritesUseCase
 	ImportURL        *ImportURLUseCase
+	ImportURLCreate  *ImportURLCreateUseCase
 	Summarize        *SummarizeUseCase
 	UserResolver     *coreauth.UserResolver
 	AuthService      *coreauth.AuthService
@@ -104,6 +106,7 @@ func NewRoutes(cfg RoutesConfig) *Routes {
 		removeFavorite:   cfg.RemoveFavorite,
 		listFavorites:    cfg.ListFavorites,
 		importURL:        cfg.ImportURL,
+		importURLCreate:  cfg.ImportURLCreate,
 		summarize:        cfg.Summarize,
 		userResolver:     cfg.UserResolver,
 		authService:      cfg.AuthService,
@@ -144,6 +147,7 @@ func (r *Routes) RegisterRoutes(ctx httpinternal.RouterContext) {
 	authGroup.POST("/pages/convert/:id", authmw.RequireEditorOrAdmin(), r.handleConvert)
 	authGroup.POST("/pages/copy/:id", authmw.RequireEditorOrAdmin(), r.handleCopy)
 	authGroup.POST("/pages/import-url", authmw.RequireEditorOrAdmin(), r.handleImportURL)
+	authGroup.POST("/pages/import-url/create", authmw.RequireEditorOrAdmin(), r.handleImportURLCreate)
 	authGroup.POST("/pages/summarize", authmw.RequireEditorOrAdmin(), r.handleSummarize)
 	if opts.EnableLinkRefactor {
 		authGroup.POST("/pages/:id/refactor/preview", authmw.RequireEditorOrAdmin(), r.handleRefactorPreview)
@@ -298,6 +302,36 @@ func (r *Routes) handleImportURL(c *gin.Context) {
 		"content": out.Content,
 		"format":  out.Format,
 	})
+}
+
+// handleImportURLCreate creates a page from reviewed import content,
+// downloading the images it references as local attachments when possible.
+// Images that fail to download keep their original URL in the stored content.
+func (r *Routes) handleImportURLCreate(c *gin.Context) {
+	var req struct {
+		URL      string  `json:"url" binding:"required"`
+		Title    string  `json:"title" binding:"required"`
+		Slug     string  `json:"slug" binding:"required"`
+		ParentID *string `json:"parentId"`
+		Content  string  `json:"content" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondWithPageStatusError(c, http.StatusBadRequest, ErrCodePageInvalidPayload, errInvalidRequestUserMsg, errInvalidRequestLogMsg)
+		return
+	}
+	user := authmw.MustGetUser(c)
+	if user == nil {
+		return
+	}
+	out, err := r.importURLCreate.Execute(c.Request.Context(), ImportURLCreateInput{
+		UserID: user.ID, ParentID: req.ParentID, Title: req.Title, Slug: req.Slug,
+		Content: req.Content, SourceURL: req.URL,
+	})
+	if err != nil {
+		respondWithPageError(c, err)
+		return
+	}
+	r.respondPage(c, http.StatusCreated, out.Page)
 }
 
 // handleSummarize asks the configured OpenAI-compatible LLM to clean up and

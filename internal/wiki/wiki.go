@@ -451,7 +451,7 @@ func (w *Wiki) initAvatarService() error {
 }
 
 func (w *Wiki) buildRoutes(options *WikiOptions) {
-	w.pagesRoutes = w.buildPagesRoutes()
+	w.pagesRoutes = w.buildPagesRoutes(options)
 	w.authRoutes = w.buildAuthRoutes()
 	w.assetsRoutes = w.buildAssetsRoutes()
 	w.revisionsRoutes = w.buildRevisionsRoutes()
@@ -489,12 +489,20 @@ func (w *Wiki) newPageOrchestrator() *pagesave.PageSaveOrchestrator {
 	)
 }
 
-func (w *Wiki) buildPagesRoutes() *wikipages.Routes {
+func (w *Wiki) buildPagesRoutes(options *WikiOptions) *wikipages.Routes {
 	o := w.newPageOrchestrator()
+	importer := urlimport.New()
+	maxAssetBytes := options.MaxAssetUploadSizeBytes
+	if maxAssetBytes <= 0 {
+		maxAssetBytes = assets.DefaultMaxUploadSizeBytes
+	}
+	createPage := wikipages.NewCreatePageUseCase(w.tree, w.slug, o, w.log, w.metrics)
+	updatePage := wikipages.NewUpdatePageUseCase(w.tree, w.slug, o, w.log, w.metrics)
+	uploadAsset := wikiassets.NewUploadAssetUseCase(w.tree, w.asset, w.revision, w.log)
 	return wikipages.NewRoutes(wikipages.RoutesConfig{
 		TreeService:      w.tree,
-		CreatePage:       wikipages.NewCreatePageUseCase(w.tree, w.slug, o, w.log, w.metrics),
-		UpdatePage:       wikipages.NewUpdatePageUseCase(w.tree, w.slug, o, w.log, w.metrics),
+		CreatePage:       createPage,
+		UpdatePage:       updatePage,
 		DeletePage:       wikipages.NewDeletePageUseCase(w.tree, w.revision, w.asset, w.favorites, o, w.log, w.metrics),
 		MovePage:         wikipages.NewMovePageUseCase(w.tree, o, w.log, w.metrics),
 		ConvertPage:      wikipages.NewConvertPageUseCase(w.tree, w.revision, w.log),
@@ -513,7 +521,8 @@ func (w *Wiki) buildPagesRoutes() *wikipages.Routes {
 		AddFavorite:      wikipages.NewAddFavoriteUseCase(w.tree, w.favorites),
 		RemoveFavorite:   wikipages.NewRemoveFavoriteUseCase(w.favorites),
 		ListFavorites:    wikipages.NewListFavoritesUseCase(w.tree, w.favorites, w.log),
-		ImportURL:        wikipages.NewImportURLUseCase(urlimport.New()),
+		ImportURL:        wikipages.NewImportURLUseCase(importer),
+		ImportURLCreate:  wikipages.NewImportURLCreateUseCase(createPage, updatePage, uploadAsset, importer, maxAssetBytes, w.log),
 		Summarize:        wikipages.NewSummarizeUseCase(llm.NewClient(w.llmCfg), w.llmCfg),
 		UserResolver:     w.userResolver,
 		AuthService:      w.auth,

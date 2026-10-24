@@ -201,6 +201,29 @@ export async function importPageFromURL(
   })) as ImportFromURLResult
 }
 
+// importPageFromURLCreate creates a page from reviewed URL-import content.
+// The server downloads the images referenced by the content as local
+// attachments; images that fail to download keep their original URL.
+export async function importPageFromURLCreate(input: {
+  url: string
+  parentId: string
+  title: string
+  slug: string
+  content: string
+}): Promise<Page> {
+  return (await fetchWithAuth(`/api/pages/import-url/create`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url: input.url,
+      parentId: input.parentId || null,
+      title: input.title,
+      slug: input.slug,
+      content: input.content,
+    }),
+  })) as Page
+}
+
 // summarizeContent asks the configured LLM to clean up and (if long) summarize
 // already-fetched content, returning improved Markdown.
 export async function summarizeContent(

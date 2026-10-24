@@ -14,12 +14,10 @@ import {
 } from '@/lib/registries'
 import { buildEditUrl } from '@/lib/routePath'
 import {
-  createPage,
   importPageFromURL,
-  NODE_KIND_PAGE,
+  importPageFromURLCreate,
   suggestSlug,
   summarizeContent,
-  updatePage,
 } from '@/lib/api/pages'
 import { handleFieldErrors } from '@/lib/handleFieldErrors'
 import { mapApiError } from '@/lib/api/errors'
@@ -149,22 +147,15 @@ export function ImportUrlDialog() {
         toast.error(t('importDialog.slugFailed'))
         return false
       }
-      const created = (await createPage({
+      // The server creates the page and downloads the referenced images as
+      // local attachments before storing the content.
+      await importPageFromURLCreate({
+        url: url.trim(),
+        parentId: parentId || '',
         title: title.trim(),
         slug,
-        parentId: parentId || '',
-        kind: NODE_KIND_PAGE,
-      })) as { id: string; version: string; slug: string }
-
-      await updatePage(
-        created.id,
-        created.version,
-        title.trim(),
-        slug,
         content,
-        [],
-        {},
-      )
+      })
       toast.success(t('importDialog.createdToast'))
       await reloadTree()
       useDialogsStore.getState().closeDialog()
