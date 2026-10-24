@@ -2308,6 +2308,94 @@
   .page-history__preview-body img {
     height: auto;
     max-width: 100%;
+    border-radius: var(--radius-md);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.06);
+  }
+
+  /* ─── Reading typography polish ─────────────────────────────────────────
+     Applies to all three markdown preview surfaces (page viewer, editor
+     preview, page-history preview). New rules use an :is() group so the
+     selector list is not triplicated again. */
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+    :where(h1, h2, h3, h4, h5, h6) {
+    font-weight: 600;
+    letter-spacing: -0.011em;
+    /* Keep anchored headings clear of sticky app headers. */
+    scroll-margin-top: 5rem;
+  }
+
+  /* h2 acts as the section divider in long articles. */
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+    :where(h2) {
+    padding-bottom: 0.3rem;
+    border-bottom: 1px solid hsl(var(--border) / 0.5);
+  }
+
+  /* Quotes: tinted panel instead of the bare italic prose default (italic
+     renders poorly for CJK text). */
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+    :where(blockquote) {
+    border-inline-start-width: 3px;
+    border-inline-start-color: hsl(var(--brand) / 0.45);
+    background: hsl(var(--surface-alt) / 0.55);
+    border-radius: 0 var(--radius-md) var(--radius-md) 0;
+    padding: 0.5rem 1rem;
+    font-style: normal;
+  }
+
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+    :where(hr) {
+    border: 0;
+    height: 1px;
+    margin-block: 2.25rem;
+    background: linear-gradient(
+      to right,
+      transparent,
+      hsl(var(--border)),
+      transparent
+    );
+  }
+
+  /* External links get a small arrow glyph (pure CSS, no renderer change). */
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+    a[href^='http']:not(:has(img))::after {
+    content: '↗';
+    display: inline-block;
+    margin-inline-start: 0.15em;
+    font-size: 0.75em;
+    line-height: 1;
+    opacity: 0.55;
+  }
+
+  /* Tables: highlight the hovered row and pin the header while scrolling. */
+  .table-wrapper tbody tr:hover {
+    background: hsl(var(--brand) / 0.07);
+  }
+
+  .table-wrapper thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
   }
 
   .markdown-editor__preview .markdown-pdf-embed,
@@ -3610,8 +3698,14 @@
   }
 
   .code,
-  pre {
-    font-family: 'Courier New', Courier, monospace !important;
+  pre,
+  code,
+  kbd,
+  samp {
+    font-family:
+      ui-monospace, 'SFMono-Regular', 'SF Mono', 'JetBrains Mono',
+      'Cascadia Code', Menlo, Consolas, 'Liberation Mono', 'Courier New',
+      monospace !important;
   }
 }
 

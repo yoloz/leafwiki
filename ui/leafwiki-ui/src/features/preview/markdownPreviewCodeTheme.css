@@ -1,9 +1,15 @@
 /* Scoped markdown code styling for viewer + editor preview.
    We intentionally keep this local to markdown preview surfaces so global prose
-   and generic pre/code styling do not interfere with syntax highlighting. */
+   and generic pre/code styling do not interfere with syntax highlighting.
 
-.page-viewer__content .inline-code,
-.markdown-editor__preview .inline-code {
+   The three preview surfaces (page viewer, editor preview, page-history
+   preview) are grouped with :is() so every rule is written exactly once. */
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .inline-code {
   border-radius: 0.25rem;
   padding: 0.25rem 0.5rem;
   font-size: 0.75rem;
@@ -13,10 +19,18 @@
 /* Tailwind Typography's `prose` class wraps inline `code` in backticks via
    ::before/::after; the pill styling above already sets code apart visually,
    so drop the redundant backticks here. */
-.page-viewer__content .inline-code::before,
-.page-viewer__content .inline-code::after,
-.markdown-editor__preview .inline-code::before,
-.markdown-editor__preview .inline-code::after {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .inline-code::before,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .inline-code::after {
   content: none;
 }
 
@@ -58,14 +72,23 @@
   }
 }
 
-:root:not(.dark) .page-viewer__content .inline-code,
-:root:not(.dark) .markdown-editor__preview .inline-code {
+:root:not(.dark)
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .inline-code {
   background: hsl(var(--surface-alt)) !important;
   color: hsl(var(--foreground)) !important;
 }
 
-:root:not(.dark) .page-viewer__content,
-:root:not(.dark) .markdown-editor__preview {
+:root:not(.dark)
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  ) {
   --hljs-foreground: #24292e;
   --hljs-background: #f8fafc;
   --hljs-keyword: #d73a49;
@@ -84,14 +107,23 @@
   --hljs-deletion-bg: #ffeef0;
 }
 
-.dark .page-viewer__content .inline-code,
-.dark .markdown-editor__preview .inline-code {
+.dark
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .inline-code {
   background: hsl(var(--surface-border)) !important;
   color: hsl(var(--foreground)) !important;
 }
 
-.dark .page-viewer__content,
-.dark .markdown-editor__preview {
+.dark
+  :is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  ) {
   --hljs-foreground: #c9d1d9;
   --hljs-background: #111827;
   --hljs-keyword: #ff7b72;
@@ -110,25 +142,22 @@
   --hljs-deletion-bg: #67060c;
 }
 
-:root:not(.dark) .page-history {
-  --hljs-foreground: #24292e;
-  --hljs-background: #f8fafc;
-}
-
-.dark .page-history {
-  --hljs-foreground: #c9d1d9;
-  --hljs-background: #111827;
-}
-
-.page-viewer__content code.hljs,
-.markdown-editor__preview code.hljs {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  code.hljs {
   padding-left: 0 !important;
   padding-right: 0;
 }
 
-.page-viewer__content .markdown-code-block,
-.markdown-editor__preview .markdown-code-block,
-.page-history__preview-body .markdown-code-block {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block {
   position: relative;
   max-width: 100%;
   min-width: 0;
@@ -140,34 +169,64 @@
 
 /* When a heading precedes a code block, remove the top margin so only
    the heading's own margin-bottom creates the gap. */
-.page-viewer__content :where(h1, h2, h3, h4, h5, h6) + .markdown-code-block,
-.markdown-editor__preview :where(h1, h2, h3, h4, h5, h6) + .markdown-code-block,
-.page-history__preview-body
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
   :where(h1, h2, h3, h4, h5, h6)
   + .markdown-code-block {
   margin-top: 0;
 }
 
-.page-viewer__content .markdown-code-block pre,
-.markdown-editor__preview .markdown-code-block pre,
-.page-history__preview-body .markdown-code-block pre {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block
+  pre {
   margin-top: 0;
   margin-bottom: 0;
   overflow-x: auto;
 }
 
-.page-viewer__content .markdown-code-block__actions,
-.markdown-editor__preview .markdown-code-block__actions,
-.page-history__preview-body .markdown-code-block__actions {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__actions {
   position: absolute;
   top: -1rem;
   right: 0.75rem;
   z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
-.page-viewer__content .markdown-code-block__copy-button,
-.markdown-editor__preview .markdown-code-block__copy-button,
-.page-history__preview-body .markdown-code-block__copy-button {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__language {
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--hljs-comment);
+  opacity: 0.8;
+  user-select: none;
+}
+
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__copy-button {
   height: 2rem;
   width: 2rem;
   border-color: color-mix(in oklab, var(--hljs-foreground) 12%, transparent);
@@ -175,51 +234,77 @@
   color: var(--hljs-foreground);
 }
 
-.page-viewer__content .markdown-code-block__copy-button:hover,
-.markdown-editor__preview .markdown-code-block__copy-button:hover,
-.page-history__preview-body .markdown-code-block__copy-button:hover {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__copy-button:hover {
   background: color-mix(in oklab, var(--hljs-background) 82%, white 10%);
   color: var(--hljs-foreground);
 }
 
-.page-viewer__content pre code.hljs,
-.markdown-editor__preview pre code.hljs,
-.page-history__preview-body pre code.hljs {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  pre
+  code.hljs {
   display: block;
   overflow-x: auto;
   padding: 1em;
 }
 
-.page-viewer__content .markdown-code-block pre code.hljs,
-.markdown-editor__preview .markdown-code-block pre code.hljs,
-.page-history__preview-body .markdown-code-block pre code.hljs {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block
+  pre
+  code.hljs {
   padding-right: 3.5rem;
 }
 
-.page-viewer__content .markdown-code-block--line-numbers pre code,
-.markdown-editor__preview .markdown-code-block--line-numbers pre code,
-.page-history__preview-body .markdown-code-block--line-numbers pre code {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block--line-numbers
+  pre
+  code {
   padding-left: 0;
 }
 
-.page-viewer__content .markdown-code-block__lines,
-.markdown-editor__preview .markdown-code-block__lines,
-.page-history__preview-body .markdown-code-block__lines {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__lines {
   display: grid;
   grid-template-columns: max-content 1fr;
   align-items: start;
   min-width: max-content;
 }
 
-.page-viewer__content .markdown-code-block__line,
-.markdown-editor__preview .markdown-code-block__line,
-.page-history__preview-body .markdown-code-block__line {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__line {
   display: contents;
 }
 
-.page-viewer__content .markdown-code-block__line-number,
-.markdown-editor__preview .markdown-code-block__line-number,
-.page-history__preview-body .markdown-code-block__line-number {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__line-number {
   position: sticky;
   left: 0;
   min-width: 2.5rem;
@@ -235,193 +320,326 @@
     color-mix(in oklab, var(--hljs-foreground) 12%, transparent);
 }
 
-.page-viewer__content .markdown-code-block__line-content,
-.markdown-editor__preview .markdown-code-block__line-content,
-.page-history__preview-body .markdown-code-block__line-content {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .markdown-code-block__line-content {
   min-height: 1.35em;
   padding-left: 0.85rem;
   white-space: pre;
 }
 
-.page-viewer__content pre,
-.markdown-editor__preview pre,
-.page-history__preview-body pre {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  pre {
   background: var(--hljs-background) !important;
   color: var(--hljs-foreground) !important;
   border: 1px solid color-mix(in oklab, var(--hljs-foreground) 10%, transparent);
   max-width: 100%;
+  border-radius: var(--radius-md);
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.07);
 }
 
-.page-viewer__content .hljs,
-.markdown-editor__preview .hljs,
-.page-history__preview-body .hljs {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs {
   color: var(--hljs-foreground);
   background: var(--hljs-background);
 }
 
-.page-viewer__content .hljs-doctag,
-.page-viewer__content .hljs-keyword,
-.page-viewer__content .hljs-meta .hljs-keyword,
-.page-viewer__content .hljs-template-tag,
-.page-viewer__content .hljs-template-variable,
-.page-viewer__content .hljs-type,
-.page-viewer__content .hljs-variable.language_,
-.page-history__preview-body .hljs-doctag,
-.page-history__preview-body .hljs-keyword,
-.page-history__preview-body .hljs-meta .hljs-keyword,
-.page-history__preview-body .hljs-template-tag,
-.page-history__preview-body .hljs-template-variable,
-.page-history__preview-body .hljs-type,
-.page-history__preview-body .hljs-variable.language_,
-.markdown-editor__preview .hljs-doctag,
-.markdown-editor__preview .hljs-keyword,
-.markdown-editor__preview .hljs-meta .hljs-keyword,
-.markdown-editor__preview .hljs-template-tag,
-.markdown-editor__preview .hljs-template-variable,
-.markdown-editor__preview .hljs-type,
-.markdown-editor__preview .hljs-variable.language_ {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-doctag,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-keyword,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-meta
+  .hljs-keyword,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-template-tag,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-template-variable,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-type,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-variable.language_ {
   color: var(--hljs-keyword);
 }
 
-.page-viewer__content .hljs-title,
-.page-viewer__content .hljs-title.class_,
-.page-viewer__content .hljs-title.class_.inherited__,
-.page-viewer__content .hljs-title.function_,
-.page-history__preview-body .hljs-title,
-.page-history__preview-body .hljs-title.class_,
-.page-history__preview-body .hljs-title.class_.inherited__,
-.page-history__preview-body .hljs-title.function_,
-.markdown-editor__preview .hljs-title,
-.markdown-editor__preview .hljs-title.class_,
-.markdown-editor__preview .hljs-title.class_.inherited__,
-.markdown-editor__preview .hljs-title.function_ {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-title,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-title.class_,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-title.class_.inherited__,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-title.function_ {
   color: var(--hljs-title);
 }
 
-.page-viewer__content .hljs-attr,
-.page-viewer__content .hljs-attribute,
-.page-viewer__content .hljs-literal,
-.page-viewer__content .hljs-meta,
-.page-viewer__content .hljs-number,
-.page-viewer__content .hljs-operator,
-.page-viewer__content .hljs-variable,
-.page-viewer__content .hljs-selector-attr,
-.page-viewer__content .hljs-selector-class,
-.page-viewer__content .hljs-selector-id,
-.page-history__preview-body .hljs-attr,
-.page-history__preview-body .hljs-attribute,
-.page-history__preview-body .hljs-literal,
-.page-history__preview-body .hljs-meta,
-.page-history__preview-body .hljs-number,
-.page-history__preview-body .hljs-operator,
-.page-history__preview-body .hljs-variable,
-.page-history__preview-body .hljs-selector-attr,
-.page-history__preview-body .hljs-selector-class,
-.page-history__preview-body .hljs-selector-id,
-.markdown-editor__preview .hljs-attr,
-.markdown-editor__preview .hljs-attribute,
-.markdown-editor__preview .hljs-literal,
-.markdown-editor__preview .hljs-meta,
-.markdown-editor__preview .hljs-number,
-.markdown-editor__preview .hljs-operator,
-.markdown-editor__preview .hljs-variable,
-.markdown-editor__preview .hljs-selector-attr,
-.markdown-editor__preview .hljs-selector-class,
-.markdown-editor__preview .hljs-selector-id {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-attr,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-attribute,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-literal,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-meta,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-number,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-operator,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-variable,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-selector-attr,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-selector-class,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-selector-id {
   color: var(--hljs-constant);
 }
 
-.page-viewer__content .hljs-regexp,
-.page-viewer__content .hljs-string,
-.page-viewer__content .hljs-meta .hljs-string,
-.page-history__preview-body .hljs-regexp,
-.page-history__preview-body .hljs-string,
-.page-history__preview-body .hljs-meta .hljs-string,
-.markdown-editor__preview .hljs-regexp,
-.markdown-editor__preview .hljs-string,
-.markdown-editor__preview .hljs-meta .hljs-string {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-regexp,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-string,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-meta
+  .hljs-string {
   color: var(--hljs-string);
 }
 
-.page-viewer__content .hljs-built_in,
-.page-viewer__content .hljs-symbol,
-.page-history__preview-body .hljs-built_in,
-.page-history__preview-body .hljs-symbol,
-.markdown-editor__preview .hljs-built_in,
-.markdown-editor__preview .hljs-symbol {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-built_in,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-symbol {
   color: var(--hljs-symbol);
 }
 
-.page-viewer__content .hljs-comment,
-.page-viewer__content .hljs-code,
-.page-viewer__content .hljs-formula,
-.page-history__preview-body .hljs-comment,
-.page-history__preview-body .hljs-code,
-.page-history__preview-body .hljs-formula,
-.markdown-editor__preview .hljs-comment,
-.markdown-editor__preview .hljs-code,
-.markdown-editor__preview .hljs-formula {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-comment,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-code,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-formula {
   color: var(--hljs-comment);
 }
 
-.page-viewer__content .hljs-name,
-.page-viewer__content .hljs-quote,
-.page-viewer__content .hljs-selector-tag,
-.page-viewer__content .hljs-selector-pseudo,
-.page-history__preview-body .hljs-name,
-.page-history__preview-body .hljs-quote,
-.page-history__preview-body .hljs-selector-tag,
-.page-history__preview-body .hljs-selector-pseudo,
-.markdown-editor__preview .hljs-name,
-.markdown-editor__preview .hljs-quote,
-.markdown-editor__preview .hljs-selector-tag,
-.markdown-editor__preview .hljs-selector-pseudo {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-name,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-quote,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-selector-tag,
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-selector-pseudo {
   color: var(--hljs-name);
 }
 
-.page-viewer__content .hljs-subst,
-.page-history__preview-body .hljs-subst,
-.markdown-editor__preview .hljs-subst {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-subst {
   color: var(--hljs-subst);
 }
 
-.page-viewer__content .hljs-section,
-.page-history__preview-body .hljs-section,
-.markdown-editor__preview .hljs-section {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-section {
   color: var(--hljs-section);
   font-weight: bold;
 }
 
-.page-viewer__content .hljs-bullet,
-.page-history__preview-body .hljs-bullet,
-.markdown-editor__preview .hljs-bullet {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-bullet {
   color: var(--hljs-bullet);
 }
 
-.page-viewer__content .hljs-emphasis,
-.page-history__preview-body .hljs-emphasis,
-.markdown-editor__preview .hljs-emphasis {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-emphasis {
   color: var(--hljs-foreground);
   font-style: italic;
 }
 
-.page-viewer__content .hljs-strong,
-.page-history__preview-body .hljs-strong,
-.markdown-editor__preview .hljs-strong {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-strong {
   color: var(--hljs-foreground);
   font-weight: bold;
 }
 
-.page-viewer__content .hljs-addition,
-.page-history__preview-body .hljs-addition,
-.markdown-editor__preview .hljs-addition {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-addition {
   color: var(--hljs-addition);
   background-color: var(--hljs-addition-bg);
 }
 
-.page-viewer__content .hljs-deletion,
-.page-history__preview-body .hljs-deletion,
-.markdown-editor__preview .hljs-deletion {
+:is(
+    .page-viewer__content,
+    .markdown-editor__preview,
+    .page-history__preview-body
+  )
+  .hljs-deletion {
   color: var(--hljs-deletion);
   background-color: var(--hljs-deletion-bg);
 }

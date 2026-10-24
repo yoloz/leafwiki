@@ -26,6 +26,13 @@ function hasLineNumbers(props: CodeElementProps): boolean {
   return (props.className ?? '').split(/\s+/).some((cls) => cls.endsWith('='))
 }
 
+// Extracts the fence language from a `language-*` class, e.g. "language-go"
+// (with the opt-in line-number "=" suffix stripped) → "go".
+function extractCodeLanguage(className: string): string {
+  const match = /language-([^\s=]+)/.exec(className)
+  return match ? match[1] : ''
+}
+
 export default function MarkdownCodeBlock(
   props: ClassAttributes<HTMLPreElement> &
     HTMLAttributes<HTMLPreElement> & { children?: ReactNode; node?: unknown },
@@ -51,6 +58,7 @@ export default function MarkdownCodeBlock(
   }
 
   const highlightedChildren = child.props.children
+  const language = extractCodeLanguage(className)
   const lines = showLineNumbers
     ? splitHighlightedLines(highlightedChildren)
     : null
@@ -63,6 +71,11 @@ export default function MarkdownCodeBlock(
       )}
     >
       <div className="markdown-code-block__actions">
+        {language && (
+          <span className="markdown-code-block__language" aria-hidden="true">
+            {language}
+          </span>
+        )}
         <TooltipWrapper
           label={
             copied ? t('codeBlock.copiedTooltip') : t('codeBlock.copyTooltip')
