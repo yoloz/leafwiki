@@ -20,15 +20,78 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.76.0
+
+      # Before anything is attested or pushed: a fixable HIGH/CRITICAL
+      # finding stops the release. The arm64 build runs emulated like the
+      # multi-arch push below (no QEMU setup step there either), and both
+      # scans share the BuildKit cache with that push.
+      - name: Scan Docker image
+        run: |
+          VERSION=${GITHUB_REF##*/}  # extract tag like v0.1.0 or branch name
+          make scan-image VERSION=$VERSION SCAN_PLATFORM=linux/amd64
+          make scan-image VERSION=$VERSION SCAN_PLATFORM=linux/arm64
+
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.x'
+          go-version-file: go.mod
 
       - name: Make release binaries
         run: |
-          VERSION="${GITHUB_REF_NAME}"
-          make release VERSION="$VERSION"
+          VERSION=${GITHUB_REF##*/}  # extract tag like v0.1.0 or branch name
+          echo "Using version: $VERSION"
+          make release VERSION=$VERSION
+
+      - name: Verify release checksums
+        # Users download binary + .sha256 into one directory and run
+        # `sha256sum -c`; the files must name the bare binary, no dir prefix.
+        working-directory: releases
+        run: sha256sum -c *.sha256
+
+      - name: Attest release binaries
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'releases/leafwiki-${{ github.ref_name }}-*'
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_GITHUB_TOKEN }}
+
+      - name: Build & Push Docker image
+        run: |
+          VERSION=${GITHUB_REF##*/}  # extract v0.1.0
+          echo "Building Multi-Arch Docker image with version $VERSION"
+          make docker-build-publish VERSION=$VERSION REPO_OWNER=${{ github.repository_owner }}
+
+      - name: Get latest tag before current one
+        id: latest
+        run: |
+          TAGS=$(git tag --sort=-v:refname)
+          echo "Available tags: $TAGS"
+          CURRENT="${{ github.ref_name }}"
+          PREVIOUS=""
+          for tag in $TAGS; do
+            if [ "$tag" = "$CURRENT" ]; then continue; fi
+            PREVIOUS=$tag
+            break
+          done
+          echo "Found previous tag: $PREVIOUS"
+          echo "tag=$PREVIOUS" >> $GITHUB_OUTPUT
+
+      - name: Generate categorized changelog
+        id: changelog
+        run: |
+          make changelog PREVIOUS=${{ steps.latest.outputs.tag }} CURRENT=${{ github.ref_name }}
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          cat current_release_changelog.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -39,6 +102,8 @@ jobs:
           files: |
             releases/leafwiki-${{ github.ref_name }}-linux-amd64
             releases/leafwiki-${{ github.ref_name }}-linux-amd64.sha256
+            releases/leafwiki-${{ github.ref_name }}-linux-386
+            releases/leafwiki-${{ github.ref_name }}-linux-386.sha256
             releases/leafwiki-${{ github.ref_name }}-linux-arm64
             releases/leafwiki-${{ github.ref_name }}-linux-arm64.sha256
             releases/leafwiki-${{ github.ref_name }}-windows-amd64.exe

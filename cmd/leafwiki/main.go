@@ -193,6 +193,9 @@ func loadDotEnv() {
 func runResetAdminPasswordCommand(cfg *serverConfig) error {
 	user, err := tools.ResetAdminPassword(cfg.server.dataDir, cfg.auth.adminUsername, cfg.auth.adminEmail)
 	if err != nil {
+		if msg, ok := corruptDatabaseMessage(err); ok {
+			return fmt.Errorf("password reset failed: %s", msg)
+		}
 		return fmt.Errorf("password reset failed: %w", err)
 	}
 
@@ -376,6 +379,9 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		Metrics: metrics,
 	})
 	if err != nil {
+		if msg, ok := corruptDatabaseMessage(err); ok {
+			fail(msg, "error", err)
+		}
 		fail("Failed to initialize Wiki", "error", err)
 	}
 
