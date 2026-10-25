@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write   # create the release and upload assets
   id-token: write   # required by actions/attest-build-provenance (OIDC)
+  attestations: write   # persist the build-provenance attestation
 
 jobs:
   release:
