@@ -362,12 +362,9 @@ may only be `latest` (a bootstrap) or the exact toolchain version. The Dev Conta
 (`.devcontainer.json`, `.devcontainer/devcontainer.json` or `.devcontainer/*/devcontainer.json`)
 installs mise and names neither.*
 CI jobs call Makefile targets; exceptions are listed at the `ci` target.
-Trivy scans the dependencies (`go.sum`, `package-lock.json`) on every PR, and the final Docker
-image on PRs that change an image input (`make scan-image`) and weekly against the published
-image (`make scan-published-image`), both in `.github/workflows/image-scan.yml`, and in the
-release workflow with `make scan-image` for amd64 and arm64 before the push. Fixable
+Trivy scans the dependencies (`go.sum`, `package-lock.json`) on every PR. Fixable
 HIGH/CRITICAL findings fail the scan; a false positive goes into `.trivyignore` with a comment
-saying why.
+saying why. The Docker image is no longer built, scanned or published by CI.
 
 ## On-disk format and migrations
 

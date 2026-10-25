@@ -743,15 +743,15 @@ Enabled when `LEAFWIKI_SNAPSHOT_SSH_HOST` + `LEAFWIKI_SNAPSHOT_SSH_USER` + `LEAF
    LEAFWIKI_SNAPSHOT_SSH_USER=user
    LEAFWIKI_SNAPSHOT_SSH_KEY_PATH=/path/to/leafwiki_ssh_key
    LEAFWIKI_SNAPSHOT_SSH_KNOWN_HOSTS=/path/to/leafwiki_known_hosts
-   # Optional: change the remote destination (default /home/user/leafwiki-backup.zip)
-   LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH=/home/user/leafwiki-backup.zip
+   # Optional: change the remote destination (default /home/<user>/leafwiki-backup.zip)
+   LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH=/home/<user>/leafwiki-backup.zip
    ```
-5. Start (or restart) LeafWiki. The next snapshot shows `snapshot SSH upload enabled` in the logs, and each snapshot lands at `/home/user/leafwiki-backup.zip` on the remote.
+5. Start (or restart) LeafWiki. The next snapshot shows `snapshot SSH upload enabled` in the logs, and each snapshot lands at `/home/<user>/leafwiki-backup.zip` on the remote.
 
 **Notes:**
 
 - The remote host must have an `scp` binary (standard on Linux/macOS). The *client* side is pure Go and needs no `scp` on the LeafWiki host.
-- `LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH` is an **absolute** path, defaulting to `/home/<user>/leafwiki-backup.zip`. Its parent directory must already exist on the remote — `scp` does not create directories, so create e.g. `/home/user/backups` first if you point the path into a subfolder.
+- `LEAFWIKI_SNAPSHOT_SSH_REMOTE_PATH` is an **absolute** path, defaulting to `/home/<user>/leafwiki-backup.zip`. Its parent directory must already exist on the remote — `scp` does not create directories, so create e.g. `/home/<user>/backups` first if you point the path into a subfolder.
 - Use a fixed remote path so the remote retains only the latest snapshot. To keep more history remotely, rotate the path (e.g. include a date) — but then prune them yourself, as LeafWiki's retention only governs the local `snapshots/` directory.
 - `LEAFWIKI_SNAPSHOT_SSH_INSECURE=true` skips host-key verification; only use it on trusted networks, since it exposes uploads to man-in-the-middle interception.
 - The snapshot still excludes `.env` and TLS keys (see [Backup & restore overview](#backup--restore-overview)); copy those separately if you need a fully off-box restore.
