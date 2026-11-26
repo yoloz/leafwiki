@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/pquerna/otp/totp"
 
 	coreauth "github.com/perber/wiki/internal/core/auth"
@@ -301,10 +303,10 @@ func TestLoginUseCase_EmitsSuccessMetric(t *testing.T) {
 	}
 }
 
-// TestLoginUseCase_EmitsLockedMetric verifies that once the per-user failure
-// threshold trips, a subsequent attempt is recorded under outcome="locked"
-// (distinct from the "invalid_credentials" outcome of the failures that
-// triggered the lock itself — see loginAttemptTracker.recordAttempt).
+// TestLoginUseCase_EmitsLockedMetric verifies that once a client has used up
+// its free attempts for an account, the next attempt from it is recorded under
+// outcome="locked" (the label counts throttled attempts), distinct from the
+// "invalid_credentials" outcome of the attempts that were verified.
 func TestLoginUseCase_EmitsLockedMetric(t *testing.T) {
 	authSvc, userSvc, metrics := setupAuthUseCases(t, false)
 	if _, err := userSvc.CreateUser("alice", "alice@example.com", "securepass", coreauth.RoleViewer); err != nil {
@@ -320,8 +322,8 @@ func TestLoginUseCase_EmitsLockedMetric(t *testing.T) {
 	}
 
 	_, err := uc.Execute(context.Background(), LoginInput{Identifier: "alice", Password: "wrong"})
-	if !errors.Is(err, coreauth.ErrUserAccountLocked) {
-		t.Fatalf("expected ErrUserAccountLocked once locked, got: %v", err)
+	if !errors.Is(err, coreauth.ErrLoginThrottled) {
+		t.Fatalf("expected ErrLoginThrottled once locked, got: %v", err)
 	}
 
 	body := metricsBody(t, metrics)
@@ -329,7 +331,7 @@ func TestLoginUseCase_EmitsLockedMetric(t *testing.T) {
 		t.Fatalf("expected locked outcome metric, got: %s", body)
 	}
 	if !strings.Contains(body, `leafwiki_auth_login_attempts_total{outcome="invalid_credentials"} 5`) {
-		t.Fatalf("expected 5 invalid_credentials attempts before the lock, got: %s", body)
+		t.Fatalf("expected 5 invalid_credentials attempts before the throttle, got: %s", body)
 	}
 }
 
@@ -407,6 +409,69 @@ func TestCompleteTOTPLoginUseCase_EmitsVerificationMetric(t *testing.T) {
 	}
 	if !strings.Contains(body, `leafwiki_auth_sessions_total{event="issued"} 1`) {
 		t.Fatalf("expected session issued metric, got: %s", body)
+	}
+}
+
+// TestCompleteTOTPLoginUseCase_EmitsLockedMetric verifies that once wrong
+// codes trip the per-user lock, even a valid code is refused, the attempt is
+// counted under result="locked", and the client gets the same answer as for
+// wrong credentials. Only code attempts count towards this lock, not the
+// password login that opened the challenge, so it trips on the fifth wrong code.
+func TestCompleteTOTPLoginUseCase_EmitsLockedMetric(t *testing.T) {
+	authSvc, userSvc, metrics := setupAuthUseCases(t, true)
+	user, err := userSvc.CreateUser("alice", "alice@example.com", "securepass", coreauth.RoleViewer)
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	generated, err := authSvc.StartTOTPSetup(user.ID, "securepass")
+	if err != nil {
+		t.Fatalf("StartTOTPSetup: %v", err)
+	}
+	setupCode, err := totp.GenerateCode(generated.Secret, time.Now())
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+	if _, err := authSvc.ConfirmTOTPSetup(user.ID, setupCode, ""); err != nil {
+		t.Fatalf("ConfirmTOTPSetup: %v", err)
+	}
+
+	loginOut, err := NewLoginUseCase(authSvc, metrics).Execute(context.Background(), LoginInput{Identifier: "alice", Password: "securepass"})
+	if err != nil {
+		t.Fatalf("Login Execute: %v", err)
+	}
+	challenge := loginOut.Token.LoginChallengeToken
+
+	completeUC := NewCompleteTOTPLoginUseCase(authSvc, metrics)
+	const wrongCodes = 5
+	for i := 0; i < wrongCodes; i++ {
+		if _, err := completeUC.Execute(context.Background(), CompleteTOTPLoginInput{LoginChallengeToken: challenge, Code: "000000"}); err == nil {
+			t.Fatalf("wrong code %d: expected an error", i)
+		}
+	}
+
+	validCode, err := totp.GenerateCode(generated.Secret, time.Now())
+	if err != nil {
+		t.Fatalf("GenerateCode: %v", err)
+	}
+	_, err = completeUC.Execute(context.Background(), CompleteTOTPLoginInput{LoginChallengeToken: challenge, Code: validCode})
+	if !errors.Is(err, coreauth.ErrLoginThrottled) {
+		t.Fatalf("expected ErrLoginThrottled for a valid code once locked, got: %v", err)
+	}
+
+	body := metricsBody(t, metrics)
+	if !strings.Contains(body, `leafwiki_auth_totp_verifications_total{result="locked"} 1`) {
+		t.Fatalf("expected totp locked metric, got: %s", body)
+	}
+	if !strings.Contains(body, fmt.Sprintf(`leafwiki_auth_totp_verifications_total{result="invalid"} %d`, wrongCodes)) {
+		t.Fatalf("expected %d invalid totp verifications before the lock, got: %s", wrongCodes, body)
+	}
+
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	respondWithAuthError(c, err)
+	if got, want := rec.Body.String(), `{"error":{"code":"auth_invalid_credentials","message":"Invalid credentials","template":"invalid credentials"}}`; rec.Code != http.StatusUnauthorized || got != want {
+		t.Fatalf("wire answer = %d %s, want 401 %s", rec.Code, got, want)
 	}
 }
 

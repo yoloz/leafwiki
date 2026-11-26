@@ -567,35 +567,24 @@ func TestSwapper_RollbackAll_RestoresItemWhenMoveInNeverHappened(t *testing.T) {
 
 // TestSwapper_SwapAll_MoveInFailureAfterMoveAside_IsRecoverableByRollback
 // reproduces the same bug end-to-end through SwapAll itself: the move-aside
-// rename (within dataDir) succeeds, but the move-in rename fails because the
-// staged item's parent directory has no write permission (removing its
-// directory entry, which os.Rename needs to do, is denied) — while dataDir
-// itself is untouched, so the first rename is unaffected.
+// rename (within dataDir) succeeds, but the move-in rename fails. The staged
+// path is the live path itself: SwapAll finds it (the staged-item check
+// passes), moves it aside, and then has nothing left to move in, which fails
+// the same way on every OS without relying on permission bits (#1698).
 func TestSwapper_SwapAll_MoveInFailureAfterMoveAside_IsRecoverableByRollback(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root ignores permission bits, cannot force the rename to fail this way")
-	}
-
 	dataDir := t.TempDir()
 	const liveContent = "original live users.db"
 	test_utils.WriteFile(t, dataDir, "users.db", liveContent)
 
-	stagedDir := t.TempDir()
-	test_utils.WriteFile(t, stagedDir, "users.db", "restored content that must never land")
-	if err := os.Chmod(stagedDir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(stagedDir, 0o700) }) // let t.TempDir() clean up
-
 	sw := &swapper{items: []*swapItem{{
 		name:       "users.db",
 		livePath:   filepath.Join(dataDir, "users.db"),
-		stagedPath: filepath.Join(stagedDir, "users.db"),
+		stagedPath: filepath.Join(dataDir, "users.db"),
 		preRestore: filepath.Join(dataDir, "users.db.pre-restore-test"),
 	}}}
 
 	if err := sw.SwapAll(); err == nil {
-		t.Fatal("expected SwapAll to fail when the move-in step can't remove the staged source entry")
+		t.Fatal("expected SwapAll to fail when the staged source is gone by the move-in step")
 	}
 
 	if err := sw.RollbackAll(); err != nil {
@@ -697,4 +686,64 @@ func writeRawZip(t *testing.T, entries map[string]string) string {
 		t.Fatalf("failed to close zip file: %v", err)
 	}
 	return zipPath
+}
+
+// swapNames order is the swap order, and every state database must be in it,
+// in walSidecarDBNames, and in StateDBFiles — pinned so the table-derived
+// lists can't silently drop or reorder a database.
+func TestSwapNames_StateDBsDerivedInOrder(t *testing.T) {
+	wantSwap := []string{"root", "assets", "branding", "avatars", "branding.json", "public-access.json", "toc-display.json", "schema.json", "users.db", "api_keys.db", "favorites.db", "usersettings.db", "share_links.db"}
+	if fmt.Sprint(swapNames) != fmt.Sprint(wantSwap) {
+		t.Errorf("swapNames = %v, want %v", swapNames, wantSwap)
+	}
+	wantWAL := []string{"users.db", "api_keys.db", "favorites.db", "usersettings.db", "share_links.db"}
+	if fmt.Sprint(walSidecarDBNames) != fmt.Sprint(wantWAL) {
+		t.Errorf("walSidecarDBNames = %v, want %v", walSidecarDBNames, wantWAL)
+	}
+	wantFiles := []string{"api_keys.db", "favorites.db", "usersettings.db", "share_links.db"}
+	if fmt.Sprint(StateDBFiles()) != fmt.Sprint(wantFiles) {
+		t.Errorf("StateDBFiles() = %v, want %v", StateDBFiles(), wantFiles)
+	}
+	for _, db := range stateDBs {
+		if db.Table == "" || len(db.Columns) == 0 {
+			t.Errorf("stateDBs entry %s has empty table or columns (package init order)", db.File)
+		}
+	}
+}
+
+func TestExtractAndValidateWithLimits_RejectsTooManyEntriesBeforeExtracting(t *testing.T) {
+	entries := map[string]string{
+		"backup-meta.json": `{"id":"x","version":"v1"}`,
+		"users.db":         "irrelevant here, the entry cap trips first",
+	}
+	for i := 0; i < 9; i++ {
+		entries[fmt.Sprintf("data/page%d.md", i)] = ""
+	}
+	zipPath := writeRawZip(t, entries)
+	limits := shared.DefaultZipExtractionLimits
+	limits.MaxEntries = 10
+	dataDir := t.TempDir()
+
+	if _, _, err := extractAndValidateWithLimits(zipPath, dataDir, limits); !errors.Is(err, shared.ErrTooManyEntries) {
+		t.Fatalf("expected ErrTooManyEntries, got: %v", err)
+	}
+	left, err := os.ReadDir(dataDir)
+	if err != nil {
+		t.Fatalf("ReadDir(dataDir) error: %v", err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("rejected archive left %d entries in the data dir, want none", len(left))
+	}
+}
+
+func TestUploadExtractionLimits_RaisesOnlyTheEntryCap(t *testing.T) {
+	want := shared.DefaultZipExtractionLimits
+	want.MaxEntries = uploadExtractionLimits.MaxEntries
+	if uploadExtractionLimits != want {
+		t.Fatalf("uploadExtractionLimits = %+v, want DefaultZipExtractionLimits with only MaxEntries changed", uploadExtractionLimits)
+	}
+	if uploadExtractionLimits.MaxEntries <= shared.DefaultZipExtractionLimits.MaxEntries {
+		t.Fatalf("restore upload entry cap %d must exceed the import cap %d: a backup holds every asset of a wiki",
+			uploadExtractionLimits.MaxEntries, shared.DefaultZipExtractionLimits.MaxEntries)
+	}
 }

@@ -1,0 +1,597 @@
+package pagedisplay
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"testing"
+
+	sharederrors "github.com/perber/wiki/internal/core/shared/errors"
+)
+
+func newTestService(t *testing.T, dir string) *Service {
+	t.Helper()
+	svc, err := New(dir)
+	if err != nil {
+		t.Fatalf("New(%s): %v", dir, err)
+	}
+	return svc
+}
+
+// Settings reads whatever toc-display.json holds and falls back to the
+// default for a missing file, a missing field (a file written before the
+// field existed, or before the tocdisplay -> pagedisplay rename) or a value
+// a hand edit broke.
+func TestService_Settings_ReadsFileOrFallsBackToDefaults(t *testing.T) {
+	defaults := Settings{ContentWidth: ContentWidthDefault}
+	tests := []struct {
+		name string
+		file string // "" = no file
+		want Settings
+	}{
+		{name: "no file", file: "", want: defaults},
+		{name: "file from before content width existed", file: `{"alwaysShow":true}`, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthDefault}},
+		{name: "empty width", file: `{"contentWidth":""}`, want: defaults},
+		{name: "unknown width from a hand-edited file", file: `{"contentWidth":"huge"}`, want: defaults},
+		{name: "default width", file: `{"contentWidth":"default"}`, want: defaults},
+		{name: "wide", file: `{"contentWidth":"wide"}`, want: Settings{ContentWidth: ContentWidthWide}},
+		{name: "file from before the subpage count existed", file: `{"alwaysShow":true,"contentWidth":"wide"}`, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide}},
+		{name: "subpage count off", file: `{"showSubpageCount":false}`, want: defaults},
+		{name: "subpage count on", file: `{"showSubpageCount":true}`, want: Settings{ContentWidth: ContentWidthDefault, ShowSubpageCount: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.file != "" {
+				if err := os.WriteFile(filepath.Join(dir, FileName), []byte(tc.file), 0o600); err != nil {
+					t.Fatalf("write file: %v", err)
+				}
+			}
+			if got := newTestService(t, dir).Settings(); got != tc.want {
+				t.Fatalf("Settings() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A restore drops in a different toc-display.json; the cache keeps the old
+// values until Reload picks the new file up.
+func TestService_Reload_PicksUpExternalFileChange(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		want Settings
+	}{
+		{name: "toc flag", file: `{"alwaysShow": true}`, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthDefault}},
+		{name: "content width", file: `{"contentWidth":"wide"}`, want: Settings{ContentWidth: ContentWidthWide}},
+		{name: "subpage count", file: `{"showSubpageCount":true}`, want: Settings{ContentWidth: ContentWidthDefault, ShowSubpageCount: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			svc := newTestService(t, dir)
+			before := svc.Settings()
+			if err := os.WriteFile(filepath.Join(dir, FileName), []byte(tc.file), 0o600); err != nil {
+				t.Fatalf("write external file: %v", err)
+			}
+			if got := svc.Settings(); got != before {
+				t.Fatalf("Settings() before Reload = %+v, want the cached %+v", got, before)
+			}
+			if err := svc.Reload(); err != nil {
+				t.Fatalf("Reload: %v", err)
+			}
+			if got := svc.Settings(); got != tc.want {
+				t.Fatalf("Settings() after Reload = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestService_SetAlwaysShow_PersistsAcrossReconstruction(t *testing.T) {
+	dir := t.TempDir()
+
+	svc := newTestService(t, dir)
+	if err := svc.SetAlwaysShow(true); err != nil {
+		t.Fatalf("SetAlwaysShow(true): %v", err)
+	}
+	if !svc.Settings().AlwaysShowToc {
+		t.Fatal("expected AlwaysShowToc true right after SetAlwaysShow(true)")
+	}
+
+	reopened := newTestService(t, dir)
+	if !reopened.Settings().AlwaysShowToc {
+		t.Fatal("expected persisted AlwaysShowToc true after reconstruction")
+	}
+
+	if err := reopened.SetAlwaysShow(false); err != nil {
+		t.Fatalf("SetAlwaysShow(false): %v", err)
+	}
+	again := newTestService(t, dir)
+	if again.Settings().AlwaysShowToc {
+		t.Fatal("expected persisted AlwaysShowToc false after SetAlwaysShow(false)")
+	}
+}
+
+func TestService_SetAlwaysShow_WritesModeSixHundredJSON(t *testing.T) {
+	dir := t.TempDir()
+	svc := newTestService(t, dir)
+	if err := svc.SetAlwaysShow(true); err != nil {
+		t.Fatalf("SetAlwaysShow(true): %v", err)
+	}
+
+	path := filepath.Join(dir, "toc-display.json")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat toc-display.json: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("expected toc-display.json mode 0600, got %o", perm)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read toc-display.json: %v", err)
+	}
+	var cfg struct {
+		AlwaysShow bool `json:"alwaysShow"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal toc-display.json: %v", err)
+	}
+	if !cfg.AlwaysShow {
+		t.Fatalf("expected {\"alwaysShow\": true} on disk, got %s", data)
+	}
+}
+
+// The frontend looks the template up verbatim in locales/*/errors.json
+// (DisplaySettings.test.tsx checks every locale for this exact key).
+func TestService_SetAlwaysShow_WriteFailure_ReturnsTranslatableError(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "data")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	svc, err := New(dir)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// A regular file where the data directory was makes every write under it
+	// fail, on every OS and regardless of the user running the test.
+	if err := os.Remove(dir); err != nil {
+		t.Fatalf("remove dir: %v", err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write placeholder file: %v", err)
+	}
+
+	err = svc.SetAlwaysShow(true)
+
+	var localized *sharederrors.LocalizedError
+	if !errors.As(err, &localized) {
+		t.Fatalf("SetAlwaysShow err = %v, want a LocalizedError", err)
+	}
+	if localized.Code != "toc_display_update_failed" {
+		t.Errorf("code = %q, want %q", localized.Code, "toc_display_update_failed")
+	}
+	const wantTemplate = "failed to persist toc-display config"
+	if localized.Template != wantTemplate {
+		t.Errorf("template = %q, want %q", localized.Template, wantTemplate)
+	}
+	if svc.Settings().AlwaysShowToc {
+		t.Error("AlwaysShowToc = true after a failed write, want the old value false")
+	}
+}
+
+func TestService_Load_CorruptFileIsAnError(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "toc-display.json"), []byte("not json"), 0o600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	if _, err := New(dir); err == nil {
+		t.Fatal("expected New to fail on an unparseable toc-display.json")
+	}
+}
+
+func TestService_ConcurrentAccess_IsRaceFree(t *testing.T) {
+	svc := newTestService(t, t.TempDir())
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(2)
+		go func(v int) { defer wg.Done(); _ = svc.SetAlwaysShow(v%2 == 0) }(i)
+		go func() { defer wg.Done(); _ = svc.Settings() }()
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = svc.SetContentWidth(ContentWidthWide) }()
+		wg.Add(1)
+		go func(v int) {
+			defer wg.Done()
+			_, _ = svc.Update(Patch{AlwaysShowToc: ptr(v%3 == 0), ContentWidth: ptr(ContentWidthDefault), ShowSubpageCount: ptr(v%2 == 0)})
+		}(i)
+		// Reload shares the setters' lock; this also guards against a
+		// lock-order deadlock between it and the store's own lock.
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = svc.Reload() }()
+	}
+	wg.Wait()
+}
+
+func TestSettings_ConfigFields_UsesTheConfigAPINames(t *testing.T) {
+	got := Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide, ShowSubpageCount: true}.ConfigFields()
+	if got["alwaysShowToc"] != true {
+		t.Fatalf("ConfigFields()[alwaysShowToc] = %v, want true (all fields: %v)", got["alwaysShowToc"], got)
+	}
+	if got["contentWidth"] != ContentWidthWide {
+		t.Fatalf("ConfigFields()[contentWidth] = %v, want %q (all fields: %v)", got["contentWidth"], ContentWidthWide, got)
+	}
+	if got["showSubpageCount"] != true {
+		t.Fatalf("ConfigFields()[showSubpageCount] = %v, want true (all fields: %v)", got["showSubpageCount"], got)
+	}
+}
+
+func TestFixed_Settings_ReturnsPinnedSettings(t *testing.T) {
+	want := Settings{AlwaysShowToc: true}
+	if got := Fixed(want).Settings(); got != want {
+		t.Fatalf("Fixed(%+v).Settings() = %+v", want, got)
+	}
+}
+
+// FileName is wired into snapshots and restore by name; it must keep
+// pointing at the file existing data directories already hold.
+func TestFileName_IsTheHistoricalTocDisplayFile(t *testing.T) {
+	if FileName != "toc-display.json" {
+		t.Fatalf("FileName = %q, want %q", FileName, "toc-display.json")
+	}
+}
+
+func TestService_SetContentWidth_PersistsAcrossReconstruction(t *testing.T) {
+	dir := t.TempDir()
+	svc := newTestService(t, dir)
+	if err := svc.SetContentWidth(ContentWidthWide); err != nil {
+		t.Fatalf("SetContentWidth(wide): %v", err)
+	}
+	if got := svc.Settings().ContentWidth; got != ContentWidthWide {
+		t.Fatalf("ContentWidth right after set = %q, want %q", got, ContentWidthWide)
+	}
+	if got := newTestService(t, dir).Settings().ContentWidth; got != ContentWidthWide {
+		t.Fatalf("ContentWidth after reconstruction = %q, want %q", got, ContentWidthWide)
+	}
+}
+
+func TestService_SetContentWidth_InvalidValueIsRejectedAndNotStored(t *testing.T) {
+	for _, value := range []string{"", "huge", "Wide", " wide", "wide ", "WIDE", "default\n", "wide\u0000", "wíde"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			svc := newTestService(t, dir)
+			err := svc.SetContentWidth(value)
+			loc, ok := sharederrors.AsLocalizedError(err)
+			if !ok || loc.Code != ErrCodeInvalidContentWidth {
+				t.Fatalf("SetContentWidth(%q) error = %v, want code %q", value, err, ErrCodeInvalidContentWidth)
+			}
+			if got := svc.Settings().ContentWidth; got != ContentWidthDefault {
+				t.Fatalf("ContentWidth after rejected set = %q, want %q", got, ContentWidthDefault)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "toc-display.json")); !os.IsNotExist(err) {
+				t.Fatalf("expected no file written for a rejected value, stat err = %v", err)
+			}
+		})
+	}
+}
+
+// Both settings share one file: changing one must not reset the other.
+func TestService_Setters_KeepTheOtherSetting(t *testing.T) {
+	dir := t.TempDir()
+	svc := newTestService(t, dir)
+	if err := svc.SetAlwaysShow(true); err != nil {
+		t.Fatalf("SetAlwaysShow(true): %v", err)
+	}
+	if err := svc.SetContentWidth(ContentWidthWide); err != nil {
+		t.Fatalf("SetContentWidth(wide): %v", err)
+	}
+	if err := svc.SetAlwaysShow(false); err != nil {
+		t.Fatalf("SetAlwaysShow(false): %v", err)
+	}
+	want := Settings{AlwaysShowToc: false, ContentWidth: ContentWidthWide}
+	if got := newTestService(t, dir).Settings(); got != want {
+		t.Fatalf("Settings after reconstruction = %+v, want %+v", got, want)
+	}
+	if err := svc.SetContentWidth(ContentWidthDefault); err != nil {
+		t.Fatalf("SetContentWidth(default): %v", err)
+	}
+	if err := svc.SetAlwaysShow(true); err != nil {
+		t.Fatalf("SetAlwaysShow(true): %v", err)
+	}
+	want = Settings{AlwaysShowToc: true, ContentWidth: ContentWidthDefault}
+	if got := newTestService(t, dir).Settings(); got != want {
+		t.Fatalf("Settings after second round = %+v, want %+v", got, want)
+	}
+}
+
+// The per-setting setters behind the old toc-display and content-width
+// routes go through the same patch path; they must not reset the subpage
+// count an admin turned on via the combined display route.
+func TestService_Setters_KeepShowSubpageCount(t *testing.T) {
+	dir := t.TempDir()
+	svc := newTestService(t, dir)
+	if _, err := svc.Update(Patch{ShowSubpageCount: ptr(true)}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if err := svc.SetAlwaysShow(true); err != nil {
+		t.Fatalf("SetAlwaysShow: %v", err)
+	}
+	if err := svc.SetContentWidth(ContentWidthWide); err != nil {
+		t.Fatalf("SetContentWidth: %v", err)
+	}
+	want := Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide, ShowSubpageCount: true}
+	if got := svc.Settings(); got != want {
+		t.Fatalf("Settings() = %+v, want %+v", got, want)
+	}
+	if got := newTestService(t, dir).Settings(); got != want {
+		t.Fatalf("Settings after reconstruction = %+v, want %+v", got, want)
+	}
+}
+
+// The on-disk key is the one older files and backups will carry from now on.
+func TestService_Update_WritesShowSubpageCountToFile(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := newTestService(t, dir).Update(Patch{ShowSubpageCount: ptr(true)}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if cfg["showSubpageCount"] != true {
+		t.Fatalf("file = %s, want showSubpageCount true", data)
+	}
+}
+
+func TestContentWidths_StartWithTheDefault(t *testing.T) {
+	got := ContentWidths()
+	if len(got) < 2 || got[0] != ContentWidthDefault {
+		t.Fatalf("ContentWidths() = %v, want %q first and at least one wider option", got, ContentWidthDefault)
+	}
+}
+
+// Concurrent admins changing different settings: every setter does a
+// read-modify-write of the shared file, so without serialisation the last
+// writer would put back a stale copy of the other setting.
+func TestService_ConcurrentSetters_DoNotClobberEachOther(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		dir := t.TempDir()
+		svc := newTestService(t, dir)
+		var wg sync.WaitGroup
+		for i := 0; i < 10; i++ {
+			wg.Add(2)
+			go func() { defer wg.Done(); _ = svc.SetAlwaysShow(true) }()
+			go func() { defer wg.Done(); _ = svc.SetContentWidth(ContentWidthWide) }()
+		}
+		wg.Wait()
+		want := Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide}
+		if got := svc.Settings(); got != want {
+			t.Fatalf("round %d: in-memory settings = %+v, want %+v", round, got, want)
+		}
+		if got := newTestService(t, dir).Settings(); got != want {
+			t.Fatalf("round %d: settings on disk = %+v, want %+v", round, got, want)
+		}
+	}
+}
+
+// A file written by an older version (or edited by hand) must survive the
+// other setter untouched: the read path normalises, the write path must not
+// drop or rewrite fields it does not own.
+func TestService_Setters_OnPreExistingFile(t *testing.T) {
+	tests := []struct {
+		name string
+		file string
+		set  func(*Service) error
+		want Settings
+	}{
+		{
+			name: "content width on a file from before the setting existed keeps alwaysShow",
+			file: `{"alwaysShow":true}`,
+			set:  func(s *Service) error { return s.SetContentWidth(ContentWidthWide) },
+			want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide},
+		},
+		{
+			name: "alwaysShow on a file with an unknown width still reads the default width",
+			file: `{"alwaysShow":false,"contentWidth":"huge"}`,
+			set:  func(s *Service) error { return s.SetAlwaysShow(true) },
+			want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthDefault},
+		},
+		{
+			name: "content width replaces an unknown stored width",
+			file: `{"alwaysShow":true,"contentWidth":"Wide"}`,
+			set:  func(s *Service) error { return s.SetContentWidth(ContentWidthWide) },
+			want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide},
+		},
+		{
+			name: "unknown keys from a newer version do not break loading or writing",
+			file: `{"alwaysShow":true,"contentWidth":"wide","futureSetting":42}`,
+			set:  func(s *Service) error { return s.SetAlwaysShow(false) },
+			want: Settings{AlwaysShowToc: false, ContentWidth: ContentWidthWide},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, FileName), []byte(tc.file), 0o600); err != nil {
+				t.Fatalf("write file: %v", err)
+			}
+			svc := newTestService(t, dir)
+			if err := tc.set(svc); err != nil {
+				t.Fatalf("set: %v", err)
+			}
+			if got := svc.Settings(); got != tc.want {
+				t.Fatalf("in-memory settings = %+v, want %+v", got, tc.want)
+			}
+			if got := newTestService(t, dir).Settings(); got != tc.want {
+				t.Fatalf("settings on disk = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+// Update changes exactly the fields the patch carries and keeps the rest.
+func TestService_Update_AppliesOnlyGivenFields(t *testing.T) {
+	start := Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide, ShowSubpageCount: true}
+	tests := []struct {
+		name  string
+		patch Patch
+		want  Settings
+	}{
+		{name: "empty patch changes nothing", patch: Patch{}, want: start},
+		{name: "only alwaysShowToc", patch: Patch{AlwaysShowToc: ptr(false)}, want: Settings{AlwaysShowToc: false, ContentWidth: ContentWidthWide, ShowSubpageCount: true}},
+		{name: "only contentWidth", patch: Patch{ContentWidth: ptr(ContentWidthDefault)}, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthDefault, ShowSubpageCount: true}},
+		{name: "only showSubpageCount", patch: Patch{ShowSubpageCount: ptr(false)}, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide, ShowSubpageCount: false}},
+		{name: "all fields", patch: Patch{AlwaysShowToc: ptr(false), ContentWidth: ptr(ContentWidthDefault), ShowSubpageCount: ptr(false)}, want: Settings{AlwaysShowToc: false, ContentWidth: ContentWidthDefault}},
+		{name: "same values", patch: Patch{AlwaysShowToc: ptr(true), ContentWidth: ptr(ContentWidthWide), ShowSubpageCount: ptr(true)}, want: start},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			svc := newTestService(t, dir)
+			if _, err := svc.Update(Patch{AlwaysShowToc: ptr(start.AlwaysShowToc), ContentWidth: ptr(start.ContentWidth), ShowSubpageCount: ptr(start.ShowSubpageCount)}); err != nil {
+				t.Fatalf("Update(start): %v", err)
+			}
+			got, err := svc.Update(tc.patch)
+			if err != nil {
+				t.Fatalf("Update(%+v): %v", tc.patch, err)
+			}
+			if got != tc.want {
+				t.Fatalf("Update returned %+v, want %+v", got, tc.want)
+			}
+			if got := svc.Settings(); got != tc.want {
+				t.Fatalf("in-memory settings = %+v, want %+v", got, tc.want)
+			}
+			if got := newTestService(t, dir).Settings(); got != tc.want {
+				t.Fatalf("settings after reconstruction = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A patch with one invalid field is rejected as a whole: the valid field
+// next to it is not applied, in memory or on disk.
+func TestService_Update_InvalidFieldChangesNothing(t *testing.T) {
+	dir := t.TempDir()
+	svc := newTestService(t, dir)
+	_, err := svc.Update(Patch{AlwaysShowToc: ptr(true), ContentWidth: ptr("huge"), ShowSubpageCount: ptr(true)})
+	loc, ok := sharederrors.AsLocalizedError(err)
+	if !ok || loc.Code != ErrCodeInvalidContentWidth {
+		t.Fatalf("Update error = %v, want code %q", err, ErrCodeInvalidContentWidth)
+	}
+	want := Settings{AlwaysShowToc: false, ContentWidth: ContentWidthDefault}
+	if got := svc.Settings(); got != want {
+		t.Fatalf("in-memory settings after rejected patch = %+v, want %+v", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, FileName)); !os.IsNotExist(err) {
+		t.Fatalf("expected no file written for a rejected patch, stat err = %v", err)
+	}
+}
+
+func TestIsInvalidInput_ClassifiesErrorCodes(t *testing.T) {
+	tests := []struct {
+		name string
+		code string
+		want bool
+	}{
+		{name: "invalid content width", code: ErrCodeInvalidContentWidth, want: true},
+		{name: "persist failure", code: ErrCodeUpdateFailed, want: false},
+		{name: "historical toc persist failure", code: "toc_display_update_failed", want: false},
+		{name: "empty", code: "", want: false},
+		{name: "foreign code", code: "page_not_found", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsInvalidInput(tc.code); got != tc.want {
+				t.Fatalf("IsInvalidInput(%q) = %v, want %v", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
+// Each write path keeps the persist error code its callers already know:
+// the old toc-display route returns toc_display_update_failed, everything
+// else page_display_update_failed. A failed write leaves memory unchanged.
+func TestService_WriteFailure_KeepsHistoricalErrorCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		write    func(*Service) error
+		wantCode string
+	}{
+		{name: "SetAlwaysShow", write: func(s *Service) error { return s.SetAlwaysShow(true) }, wantCode: "toc_display_update_failed"},
+		{name: "SetContentWidth", write: func(s *Service) error { return s.SetContentWidth(ContentWidthWide) }, wantCode: ErrCodeUpdateFailed},
+		{name: "Update", write: func(s *Service) error {
+			_, err := s.Update(Patch{AlwaysShowToc: ptr(true), ContentWidth: ptr(ContentWidthWide)})
+			return err
+		}, wantCode: ErrCodeUpdateFailed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			svc := newTestService(t, dir)
+			// A directory where the file should be makes the atomic rename
+			// fail on every OS.
+			if err := os.Mkdir(filepath.Join(dir, FileName), 0o700); err != nil {
+				t.Fatalf("mkdir: %v", err)
+			}
+			err := tc.write(svc)
+			loc, ok := sharederrors.AsLocalizedError(err)
+			if !ok || loc.Code != tc.wantCode {
+				t.Fatalf("error = %v, want code %q", err, tc.wantCode)
+			}
+			want := Settings{AlwaysShowToc: false, ContentWidth: ContentWidthDefault}
+			if got := svc.Settings(); got != want {
+				t.Fatalf("in-memory settings after failed write = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// After a restore swaps the file and Reload runs, a partial Update starts
+// from the restored values, not from the cache before the restore.
+func TestService_Update_AfterReload_KeepsRestoredFields(t *testing.T) {
+	tests := []struct {
+		name     string
+		restored string
+		patch    Patch
+		want     Settings
+	}{
+		{name: "width patch keeps restored toc flag", restored: `{"alwaysShow":true}`, patch: Patch{ContentWidth: ptr(ContentWidthWide)}, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide}},
+		{name: "toc patch keeps restored width", restored: `{"contentWidth":"wide"}`, patch: Patch{AlwaysShowToc: ptr(true)}, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide}},
+		{name: "toc patch keeps restored subpage count", restored: `{"showSubpageCount":true}`, patch: Patch{AlwaysShowToc: ptr(true)}, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthDefault, ShowSubpageCount: true}},
+		{name: "subpage count patch keeps restored toc flag and width", restored: `{"alwaysShow":true,"contentWidth":"wide"}`, patch: Patch{ShowSubpageCount: ptr(true)}, want: Settings{AlwaysShowToc: true, ContentWidth: ContentWidthWide, ShowSubpageCount: true}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			svc := newTestService(t, dir)
+			if err := os.WriteFile(filepath.Join(dir, FileName), []byte(tc.restored), 0o600); err != nil {
+				t.Fatalf("write restored file: %v", err)
+			}
+			if err := svc.Reload(); err != nil {
+				t.Fatalf("Reload: %v", err)
+			}
+			got, err := svc.Update(tc.patch)
+			if err != nil {
+				t.Fatalf("Update: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("Update after Reload = %+v, want %+v", got, tc.want)
+			}
+			if got := newTestService(t, dir).Settings(); got != tc.want {
+				t.Fatalf("settings on disk after Update = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}

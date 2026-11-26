@@ -72,7 +72,7 @@ docker run -p 8080:8080 -v ~/leafwiki-data:/app/data \
 **Core functionality:**
 - Tree navigation — explicit hierarchy, not flat note feeds
 - Manual page ordering — sort order is explicit, not driven by filename (see [Sorting Pages](#sorting-pages))
-- Full-text search across titles and content, with tag-based filtering
+- Full-text search across titles and content, with tag-based filtering; finds matches from two characters, with built-in query syntax help (phrases, `title:`, `OR`, `NOT`, `word*`)
 - Tags on pages — searchable and filterable across the wiki
 - Backlinks and link status per page (incoming, outgoing, broken links), with a dedicated admin view for auditing broken links
 - Built-in Markdown editor with live preview, keyboard shortcuts, and autocomplete for internal page links
@@ -84,7 +84,7 @@ docker run -p 8080:8080 -v ~/leafwiki-data:/app/data \
 - Inject HTML/JS into `<head>` for analytics or custom CSS
 - Branding: logo, favicon, site name
 - Dark mode and mobile-friendly UI
-- Translated UI — ships in English, German, and Spanish; `--default-language` picks the default. Contributions of other languages are very welcome — see [docs/i18n.md](docs/i18n.md)
+- Translated UI — ships in English, German, Spanish, French, and Simplified Chinese; `--default-language` picks the default. Contributions of other languages are very welcome — see [docs/i18n.md](docs/i18n.md)
 
 **Opt-in via feature flags:**
 - Revision history (`--enable-revision`)
@@ -127,10 +127,6 @@ docker run -p 8080:8080 -v ~/leafwiki-data:/app/data \
 - Teams looking for a Confluence or Notion replacement
 
 LeafWiki is intentionally narrower than those systems. That focus is part of the value.
-
----
-
-**Prefer not to run your own server?** Free hosted beta — 10 spots, starting September 2026. [Get a beta spot →](https://leafwiki.com/hosted/#waitlist) and help shape the hosted version.
 
 ---
 
@@ -249,7 +245,7 @@ Requires Go and Node.js (versions: the `toolchain` line in `go.mod`, and `.nvmrc
 ```bash
 git clone https://github.com/perber/leafwiki.git
 cd leafwiki
-git switch --detach v0.13.0   # or any tag / main
+git switch --detach v0.15.0   # or any tag / main
 make build
 ./leafwiki --disable-auth --host=127.0.0.1 --data-dir ./data --allow-insecure=true --no-tls
 ```
@@ -322,6 +318,22 @@ Anyone can browse the wiki without logging in. Only authenticated users with an 
 
 Use this for open documentation or project wikis where readers don't need accounts, but you still want to control who can edit.
 
+A public wiki also serves each page with its title, a description (the page's `description` property, otherwise the start of the page) and Open Graph tags for search engines and link previews. Set `--public-url` (including `--base-path`) to add canonical links; without it they are left out.
+
+#### Search engines
+
+| What | Behaviour |
+|------|-----------|
+| `/robots.txt` | `Allow: /` with public access, `Disallow: /` without; announces the sitemap when `--public-url` is set |
+| `/sitemap.xml` | Lists every page readable without login; only with `--public-url`, otherwise 404 |
+| `/` | 302 redirect to the first page |
+| Route without a page | Served with a `noindex` robots tag |
+| `Accept: text/markdown` | Returns the page's Markdown (without frontmatter) instead of the app |
+| Search-engine crawlers (Googlebot, Bingbot, …) | Get the rendered page content in the HTML; add `?ssr` to a page URL to see that content in a browser |
+
+- Under `--base-path`, crawlers ignore `robots.txt` (they only read it at the host root); submit `<public-url>/sitemap.xml` to the search engine yourself
+- Page responses carry `Vary: User-Agent, Accept` and `Cache-Control: no-cache`; a CDN in front of the wiki must respect them, or visitors may get the crawler or Markdown variant
+
 ### 3. No login — everyone can read and edit (`--disable-auth`)
 
 Authentication is completely disabled. Anyone who can reach the server can read and edit all pages.
@@ -391,15 +403,18 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#development-setup) for running the two sep
 | `--data-dir`                     | Directory where data is stored                                          | `./data`      | –       |
 | `--admin-username`               | Initial admin username (only applied if no admin exists yet)            | `admin`       | v0.12.0 |
 | `--admin-email`                  | Initial admin email (only applied if no admin exists yet)               | `admin@localhost` | v0.12.0 |
+| `--editor-limit`                 | Maximum number of admin and editor users; `0` = unlimited               | `0`           | v0.13.0 |
 | `--public-access`                | Allow public read-only access                                           | `false`       | –       |
 | `--base-path`                    | URL prefix for reverse proxy setups (e.g. `/wiki`)                      | `""`          | v0.8.2  |
+| `--public-url`                   | Public base URL of this wiki including `--base-path` (absolute `http(s)://`); used for links in outgoing email (required when `--smtp-host` is set) and for canonical links in public wikis | `""` | v0.13.0 |
 | `--allow-insecure`               | ⚠️ Enables HTTP for auth cookies (required for plain HTTP)              | `false`       | v0.7.0  |
+| `--disable-security-headers`     | Omit the security response headers (needed to embed the wiki on another origin), see [Security](#security) | `false` | v0.15.0 |
 | `--disable-auth`                 | ⚠️ Disable all authentication (internal networks only)                  | `false`       | v0.7.0  |
 | `--access-token-timeout`         | Access token duration (e.g. `24h`, `15m`)                               | `15m`         | v0.7.0  |
 | `--refresh-token-timeout`        | Refresh token duration (e.g. `168h`)                                    | `168h`        | v0.7.0  |
 | `--max-asset-upload-size`        | Max upload size (e.g. `50MiB`, `52428800`)                              | `50MiB`       | v0.8.5  |
 | `--custom-stylesheet`            | Path to a `.css` file inside the data dir                               | `""`          | v0.8.5  |
-| `--default-language`             | Default UI language code (`en`, `de`, `es`)                             | `""`          | v0.13.0 |
+| `--default-language`             | Default UI language code (`en`, `de`, `es`, `fr`, `zh`)                 | `""`          | v0.13.0 |
 | `--inject-code-in-header`        | Raw HTML/JS injected into `<head>`                                      | `""`          | v0.6.0  |
 | `--hide-link-metadata-section`   | Hide backlinks and link status panel                                    | `false`       | –       |
 | `--enable-revision`              | Enable revision history                                                 | `false`       | v0.9.0  |
@@ -411,7 +426,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#development-setup) for running the two sep
 | `--enable-http-remote-user-auto-create` | Auto-provision users the proxy asserts but LeafWiki doesn't know    | `false`    | v0.12.1 |
 | `--http-remote-user-email-header-name` | Header name carrying the email for auto-created users               | `""`        | v0.12.1 |
 | `--http-remote-user-default-role` | Role assigned to auto-created users; must not be `admin`               | `viewer`      | v0.12.1 |
-| `--trusted-proxy-ips`            | Trusted proxy IPs/CIDRs for remote-user header                          | `""`          | v0.10.0 |
+| `--trusted-proxy-ips`            | IPs/CIDRs of your reverse proxies. Only requests from these addresses may pass the visitor's address in `X-Forwarded-For` (used for the access log, rate limits and login backoff) or a remote-user header. Behind a reverse proxy, list it here | `""` | v0.10.0 |
 | `--login-url`                    | Redirect to an external URL instead of the built-in login form          | `""`          | v0.12.0 |
 | `--logout-url`                   | Redirect to an external URL after logout                                | `""`          | v0.12.0 |
 | `--http-remote-user-logout-url`  | ⚠️ Deprecated, use `--logout-url` instead                               | `""`          | v0.10.0 |
@@ -456,7 +471,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#development-setup) for running the two sep
 | `--smtp-security`                | Transport security: `none`, `starttls`, or `tls`                        | `starttls`    | v0.13.0 |
 | `--smtp-insecure-skip-verify`    | Skip TLS certificate verification for SMTP (testing only)               | `false`       | v0.13.0 |
 | `--smtp-timeout`                 | Timeout for a single SMTP send (e.g. `10s`)                             | `10s`         | v0.13.0 |
-| `--public-url`                   | Base URL for links in outgoing email (required when `--smtp-host` is set) | `""`        | v0.13.0 |
 | `--no-tls`                       | ⚠️ Serve plain HTTP instead of the default HTTPS (HTTPS is automatic when no `--tls-cert`/`--tls-key` is given) | `false` | v0.13.0 |
 | `--tls-cert`                     | Path to a TLS certificate file; enables native HTTPS. Requires `--tls-key` | `""` | v0.13.0 |
 | `--tls-key`                      | Path to a TLS private key file; enables native HTTPS. Requires `--tls-cert` | `""` | v0.13.0 |
@@ -477,16 +491,19 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#development-setup) for running the two sep
 | `LEAFWIKI_ADMIN_PASSWORD`               | Initial admin password *(required)*                  | –             | –       |
 | `LEAFWIKI_ADMIN_USERNAME`               | Initial admin username (only applied if no admin exists yet) | `admin`       | v0.12.0 |
 | `LEAFWIKI_ADMIN_EMAIL`                  | Initial admin email (only applied if no admin exists yet) | `admin@localhost` | v0.12.0 |
+| `LEAFWIKI_EDITOR_LIMIT`                 | Maximum number of admin and editor users; `0` = unlimited | `0`  | v0.13.0 |
 | `LEAFWIKI_JWT_SECRET`                   | JWT signing secret *(required)*                      | –             | –       |
 | `LEAFWIKI_PUBLIC_ACCESS`                | Allow public read-only access                        | `false`       | –       |
 | `LEAFWIKI_BASE_PATH`                    | URL prefix for reverse proxy                         | `""`          | v0.8.2  |
+| `LEAFWIKI_PUBLIC_URL`                   | Public base URL of this wiki including the base path (absolute `http(s)://`); used for links in outgoing email (required with `LEAFWIKI_SMTP_HOST`) and for canonical links in public wikis | `""` | v0.13.0 |
 | `LEAFWIKI_ALLOW_INSECURE`               | ⚠️ HTTP auth cookies                                 | `false`       | v0.7.0  |
+| `LEAFWIKI_DISABLE_SECURITY_HEADERS`     | Omit the security response headers                   | `false`       | v0.15.0 |
 | `LEAFWIKI_DISABLE_AUTH`                 | ⚠️ Disable authentication                            | `false`       | v0.7.0  |
 | `LEAFWIKI_ACCESS_TOKEN_TIMEOUT`         | Access token duration                                | `15m`         | v0.7.0  |
 | `LEAFWIKI_REFRESH_TOKEN_TIMEOUT`        | Refresh token duration                               | `168h`        | v0.7.0  |
 | `LEAFWIKI_MAX_ASSET_UPLOAD_SIZE`        | Max upload size                                      | `50MiB`       | v0.8.5  |
 | `LEAFWIKI_CUSTOM_STYLESHEET`            | Path to `.css` file inside data dir                  | `""`          | v0.8.5  |
-| `LEAFWIKI_DEFAULT_LANGUAGE`             | Default UI language code (`en`, `de`, `es`)          | `""`          | v0.13.0 |
+| `LEAFWIKI_DEFAULT_LANGUAGE`             | Default UI language code (`en`, `de`, `es`, `fr`, `zh`) | `""`          | v0.13.0 |
 | `LEAFWIKI_INJECT_CODE_IN_HEADER`        | HTML/JS injected into `<head>`                       | `""`          | v0.6.0  |
 | `LEAFWIKI_HIDE_LINK_METADATA_SECTION`   | Hide backlinks and link status panel                 | `false`       | –       |
 | `LEAFWIKI_ENABLE_REVISION`              | Revision history                                     | `false`       | v0.9.0  |
@@ -498,7 +515,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#development-setup) for running the two sep
 | `LEAFWIKI_ENABLE_HTTP_REMOTE_USER_AUTO_CREATE` | Auto-provision users the proxy asserts but LeafWiki doesn't know | `false` | v0.12.1 |
 | `LEAFWIKI_HTTP_REMOTE_USER_EMAIL_HEADER_NAME` | Email header for auto-created users            | `""`          | v0.12.1 |
 | `LEAFWIKI_HTTP_REMOTE_USER_DEFAULT_ROLE` | Role assigned to auto-created users; must not be `admin` | `viewer`      | v0.12.1 |
-| `LEAFWIKI_TRUSTED_PROXY_IPS`            | Trusted proxy IPs/CIDRs                              | `""`          | v0.10.0 |
+| `LEAFWIKI_TRUSTED_PROXY_IPS`            | IPs/CIDRs of your reverse proxies whose `X-Forwarded-For` and remote-user headers LeafWiki trusts | `""` | v0.10.0 |
 | `LEAFWIKI_LOGIN_URL`                    | Redirect to an external URL instead of the login form | `""`          | v0.12.0 |
 | `LEAFWIKI_LOGOUT_URL`                   | Redirect to an external URL after logout             | `""`          | v0.12.0 |
 | `LEAFWIKI_HTTP_REMOTE_USER_LOGOUT_URL`  | ⚠️ Deprecated, use `LEAFWIKI_LOGOUT_URL` instead     | `""`          | v0.10.0 |
@@ -544,7 +561,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md#development-setup) for running the two sep
 | `LEAFWIKI_SMTP_SECURITY`               | Transport security: `none`, `starttls`, or `tls`    | `starttls`    | v0.13.0 |
 | `LEAFWIKI_SMTP_INSECURE_SKIP_VERIFY`   | Skip TLS certificate verification for SMTP           | `false`       | v0.13.0 |
 | `LEAFWIKI_SMTP_TIMEOUT`                | Timeout for a single SMTP send                       | `10s`         | v0.13.0 |
-| `LEAFWIKI_PUBLIC_URL`                  | Base URL for links in outgoing email (required with `LEAFWIKI_SMTP_HOST`) | `""` | v0.13.0 |
 | `LEAFWIKI_NO_TLS`                      | ⚠️ Serve plain HTTP instead of the default HTTPS               | `false` | v0.13.0 |
 | `LEAFWIKI_TLS_CERT`                    | Path to TLS certificate file; enables native HTTPS (requires `LEAFWIKI_TLS_KEY`) | `""` | v0.13.0 |
 | `LEAFWIKI_TLS_KEY`                     | Path to TLS private key file; enables native HTTPS (requires `LEAFWIKI_TLS_CERT`) | `""` | v0.13.0 |
@@ -776,7 +792,7 @@ Available since v0.13.0. Configure an SMTP server to enable the **forgot-passwor
 ```
 
 - `--smtp-from` and `--public-url` are **required** once `--smtp-host` is set — the server refuses to start otherwise
-- `--public-url` must be an absolute `http(s)://` URL; it is the base for links in outgoing email
+- `--public-url` must be an absolute `http(s)://` URL; it is the base for links in outgoing email. Without SMTP an invalid value is ignored with a warning
 - `--smtp-security` is one of `none`, `starttls` (default), or `tls`
 - Prefer `LEAFWIKI_SMTP_PASSWORD` over the flag to keep the password out of process listings
 - `--smtp-insecure-skip-verify` disables TLS certificate verification — for testing only
@@ -790,7 +806,21 @@ Enabled by default since v0.7.0:
 - Secure, HttpOnly cookies for session handling
 - CSRF protection on all state-changing requests
 - Rate limiting on auth endpoints
+
+Behind a reverse proxy, list it in `--trusted-proxy-ips` (e.g. `127.0.0.1`): otherwise all visitors share the proxy's address in the access log, rate limits and login backoff.
 - Role-based access: admin, editor, viewer
+
+Since v0.15.0, responses carry `X-Frame-Options: SAMEORIGIN`,
+`Referrer-Policy: strict-origin-when-cross-origin` and `X-Content-Type-Options: nosniff` (the
+last one not on the app's own `/static/` files), and the wiki page carries a
+Content-Security-Policy
+(`script-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'self'`).
+A page on another origin can therefore no longer embed the wiki in an `<iframe>`. If you need
+that, set **`--disable-security-headers`** and send the headers you want from your reverse proxy.
+
+If `--inject-code-in-header` contains script (`<script>`, `javascript:` or an `on…=` handler),
+`script-src 'self'` is left out so that code keeps running, and the server logs a warning at
+startup. Snippets with only `<meta>` or `<link>` tags keep it.
 
 **`--disable-auth`** removes all authentication. Only use for local development, trusted internal networks, or isolated environments.
 
@@ -893,7 +923,6 @@ If it's useful to you:
 - ⭐ **[Star the repo](https://github.com/perber/leafwiki)** — helps others find it
 - 💛 **[Sponsor on GitHub](https://github.com/sponsors/perber)** — supports ongoing maintenance, bug fixes, and new features
 - ☕ **[Buy a coffee on Ko-fi](https://ko-fi.com/perber)** — a one-time thank-you
-- 🚀 **[Don't want to self-host? LeafWiki Hosted](https://leafwiki.com/hosted/)** — managed LeafWiki, your content stays plain Markdown
 
 Need help deploying LeafWiki for your team? [Business support & setup →](https://leafwiki.com/support/)
 

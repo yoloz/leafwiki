@@ -1,12 +1,14 @@
 package wiki
 
 import (
+	"context"
 	"path/filepath"
 
 	"github.com/perber/wiki/internal/core/assets"
 	httpinternal "github.com/perber/wiki/internal/http"
 	coreimporter "github.com/perber/wiki/internal/importer"
 	"github.com/perber/wiki/internal/llm"
+	"github.com/perber/wiki/internal/scopedread"
 	"github.com/perber/wiki/internal/urlimport"
 	wikiapikeys "github.com/perber/wiki/internal/wiki/apikeys"
 	wikiassets "github.com/perber/wiki/internal/wiki/assets"
@@ -25,6 +27,7 @@ import (
 	wikiresync "github.com/perber/wiki/internal/wiki/resync"
 	wikirevisions "github.com/perber/wiki/internal/wiki/revisions"
 	wikisearch "github.com/perber/wiki/internal/wiki/search"
+	wikishares "github.com/perber/wiki/internal/wiki/shares"
 	wikisnapshot "github.com/perber/wiki/internal/wiki/snapshot"
 	wikitags "github.com/perber/wiki/internal/wiki/tags"
 	wikiusersettings "github.com/perber/wiki/internal/wiki/usersettings"
@@ -43,6 +46,13 @@ func (w *Wiki) buildRoutes(options *WikiOptions) {
 	w.avatarRoutes = w.buildAvatarRoutes()
 	w.userSettingsRoutes = w.buildUserSettingsRoutes()
 	w.apiKeysRoutes = w.buildAPIKeysRoutes()
+	if w.shareLinks != nil {
+		w.sharesRoutes = wikishares.NewRoutes(wikishares.RoutesConfig{
+			GetPage: wikishares.NewGetSharedPageUseCase(w.shareLinks, scopedread.NewPageReader(w.tree)),
+			GetTree: wikishares.NewGetSharedTreeUseCase(w.shareLinks, scopedread.NewTreeReader(w.tree)),
+			Log:     w.log,
+		})
+	}
 	w.importerRoutes = w.buildImporterRoutes(options)
 	w.healthRoutes = wikihealth.NewRoutes(wikihealth.RoutesConfig{
 		Index:      w.searchIndex,
@@ -79,6 +89,15 @@ func (w *Wiki) buildPagesRoutes(options *WikiOptions) *wikipages.Routes {
 	createPage := wikipages.NewCreatePageUseCase(w.tree, w.slug, o, w.log, w.metrics)
 	updatePage := wikipages.NewUpdatePageUseCase(w.tree, w.slug, o, w.log, w.metrics)
 	uploadAsset := wikiassets.NewUploadAssetUseCase(w.tree, w.asset, w.revision, w.log)
+	uploadImportAsset := func(ctx context.Context, in wikipages.ImportAssetUploadInput) (*wikipages.ImportAssetUploadOutput, error) {
+		out, err := uploadAsset.Execute(ctx, wikiassets.UploadAssetInput{
+			UserID: in.UserID, PageID: in.PageID, File: in.File, Filename: in.Filename, MaxBytes: in.MaxBytes,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &wikipages.ImportAssetUploadOutput{URL: out.URL}, nil
+	}
 	return wikipages.NewRoutes(wikipages.RoutesConfig{
 		TreeService:     w.tree,
 		CreatePage:      createPage,
@@ -88,6 +107,8 @@ func (w *Wiki) buildPagesRoutes(options *WikiOptions) *wikipages.Routes {
 		ConvertPage:     wikipages.NewConvertPageUseCase(w.tree, w.revision, w.log),
 		CopyPage:        wikipages.NewCopyPageUseCase(w.tree, w.slug, o, w.asset, w.log),
 		Queries:         wikipages.NewPageQueries(w.tree),
+		PageViewByID:    wikipages.NewGetPageViewByIDUseCase(w.tree),
+		PageViewByPath:  wikipages.NewGetPageViewByPathUseCase(w.tree),
 		SortPages:       wikipages.NewSortPagesUseCase(w.tree),
 		EnsurePath:      wikipages.NewEnsurePathUseCase(w.tree, w.slug, o, w.log),
 		SuggestSlug:     wikipages.NewSuggestSlugUseCase(w.tree, w.slug),
@@ -98,7 +119,7 @@ func (w *Wiki) buildPagesRoutes(options *WikiOptions) *wikipages.Routes {
 		RemoveFavorite:  wikipages.NewRemoveFavoriteUseCase(w.favorites),
 		ListFavorites:   wikipages.NewListFavoritesUseCase(w.tree, w.favorites, w.log),
 		ImportURL:       wikipages.NewImportURLUseCase(importer),
-		ImportURLCreate: wikipages.NewImportURLCreateUseCase(createPage, updatePage, uploadAsset, importer, maxAssetBytes, w.log),
+		ImportURLCreate: wikipages.NewImportURLCreateUseCase(createPage, updatePage, uploadImportAsset, importer, maxAssetBytes, w.log),
 		Summarize:       wikipages.NewSummarizeUseCase(llm.NewClient(w.llmCfg), w.llmCfg),
 		UserResolver:    w.userResolver,
 		AuthService:     w.auth,
@@ -159,7 +180,7 @@ func (w *Wiki) buildRevisionsRoutes() *wikirevisions.Routes {
 
 func (w *Wiki) buildSearchRoutes() *wikisearch.Routes {
 	return wikisearch.NewRoutes(wikisearch.RoutesConfig{
-		Search:            wikisearch.NewSearchUseCase(w.searchIndex, w.tags, w.tree),
+		Search:            wikisearch.NewSearchUseCase(w.searchIndex, w.tags, w.tree, w.log),
 		GetIndexingStatus: wikisearch.NewGetIndexingStatusUseCase(w.status),
 		AuthService:       w.auth,
 	})
@@ -268,6 +289,7 @@ func (w *Wiki) Registrars() []httpinternal.RouteRegistrar {
 		w.importerRoutes,
 		w.healthRoutes,
 		w.resyncRoutes,
+		w.seoRoutes(),
 	}
 	if w.backupRoutes != nil {
 		registrars = append(registrars, w.backupRoutes)
@@ -277,6 +299,9 @@ func (w *Wiki) Registrars() []httpinternal.RouteRegistrar {
 	}
 	if w.restoreRoutes != nil {
 		registrars = append(registrars, w.restoreRoutes)
+	}
+	if w.sharesRoutes != nil {
+		registrars = append(registrars, w.sharesRoutes)
 	}
 	if w.instanceSettingsRoutes != nil {
 		registrars = append(registrars, w.instanceSettingsRoutes)
@@ -307,14 +332,8 @@ func (w *Wiki) SetInstanceSettingsRoutes(r *wikiinstancesettings.Routes) {
 // FrontendConfig returns the minimal runtime data required by the router to serve the SPA.
 func (w *Wiki) FrontendConfig() httpinternal.FrontendConfig {
 	return httpinternal.FrontendConfig{
-		StorageDir: w.storageDir,
-		GetSiteName: func() string {
-			cfg, err := w.branding.GetBranding()
-			if err != nil || cfg == nil {
-				return ""
-			}
-			return cfg.SiteName
-		},
+		StorageDir:  w.storageDir,
+		GetSiteName: w.siteName,
 		GetFaviconFile: func() string {
 			cfg, err := w.branding.GetBranding()
 			if err != nil || cfg == nil {
@@ -322,5 +341,18 @@ func (w *Wiki) FrontendConfig() httpinternal.FrontendConfig {
 			}
 			return cfg.FaviconFile
 		},
+		// SPA shell seam (ADR-0017): features register here, in the order
+		// they should run. Requests reaching them are always anonymous.
+		ShellResponders:   w.seoShellResponders(),
+		ShellContributors: w.seoShellContributors(),
 	}
+}
+
+// siteName returns the branding site name, "" when none is configured.
+func (w *Wiki) siteName() string {
+	cfg, err := w.branding.GetBranding()
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.SiteName
 }

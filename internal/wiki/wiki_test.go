@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/perber/wiki/internal/core/shared/sqliteutil"
 	"github.com/perber/wiki/internal/core/tree"
 	httpmetrics "github.com/perber/wiki/internal/http/metrics"
+	"github.com/perber/wiki/internal/restore"
 	"github.com/perber/wiki/internal/test_utils"
 	wikipages "github.com/perber/wiki/internal/wiki/pages"
 	wikiresync "github.com/perber/wiki/internal/wiki/resync"
@@ -351,12 +353,12 @@ func TestWiki_Login_SuccessAndFailure(t *testing.T) {
 		t.Fatal("expected auth service to be initialized")
 	}
 
-	token, err := authSvc.Login("admin", "adminpassword")
+	token, err := authSvc.Login("admin", "adminpassword", "")
 	if err != nil || token == nil {
 		t.Error("Expected login to succeed with default admin password")
 	}
 
-	_, err = authSvc.Login("admin", "wrong")
+	_, err = authSvc.Login("admin", "wrong", "")
 	if err == nil {
 		t.Error("Expected login to fail with wrong password")
 	}
@@ -720,7 +722,7 @@ func seedWikiWithUser(t *testing.T, dir string) {
 	if err := w.Favorites().Add(alice.ID, "page-1"); err != nil {
 		t.Fatalf("Favorites.Add: %v", err)
 	}
-	if _, err := w.auth.Login("alice", "alicepassword"); err != nil {
+	if _, err := w.auth.Login("alice", "alicepassword", ""); err != nil {
 		t.Fatalf("Login: %v", err)
 	}
 	if err := w.Close(); err != nil {
@@ -768,7 +770,7 @@ func TestNewWiki_CorruptQuarantinedStore_BootsAndKeepsUsers(t *testing.T) {
 				if err != nil {
 					t.Fatalf("alice lost after the restart: %v", err)
 				}
-				if _, err := w.auth.Login("alice", "alicepassword"); err != nil {
+				if _, err := w.auth.Login("alice", "alicepassword", ""); err != nil {
 					t.Fatalf("Login after the restart: %v", err)
 				}
 				favs, err := w.Favorites().ListPageIDsForUser(alice.ID)
@@ -824,4 +826,112 @@ func TestNewWiki_RelativeDataDir_UsersDB(t *testing.T) {
 		test_utils.AssertFilesUnchanged(t, files)
 		test_utils.AssertNoSQLiteQuarantine(t, filepath.Join("data", "users.db"))
 	})
+}
+
+// Every store the composition root registers for live restore must also be
+// listed in restore.StateDBFiles, or snapshots would not capture its file and
+// a restore would not swap it. Its File label must also be the database the
+// store actually opens: the store packages name their files themselves, so a
+// renamed file or a mixed-up label would otherwise drop it from snapshots.
+func TestWiki_StateStores_AreRegisteredForBackupAndRestore(t *testing.T) {
+	tests := []struct {
+		name             string
+		enableAPIKeys    bool
+		enableShareLinks bool
+		wantFiles        []string
+	}{
+		{name: "optional features on", enableAPIKeys: true, enableShareLinks: true, wantFiles: []string{"api_keys.db", "favorites.db", "usersettings.db", "share_links.db"}},
+		{name: "optional features off", wantFiles: []string{"favorites.db", "usersettings.db"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			storageDir := t.TempDir()
+			w, err := NewWiki(&WikiOptions{
+				StorageDir:             storageDir,
+				AdminPassword:          "adminpassword",
+				JWTSecret:              "secretkey",
+				AccessTokenTimeout:     15 * time.Minute,
+				RefreshTokenTimeout:    7 * 24 * time.Hour,
+				EnableAPIKeyManagement: tc.enableAPIKeys,
+				EnableShareLinks:       tc.enableShareLinks,
+			})
+			if err != nil {
+				t.Fatalf("NewWiki: %v", err)
+			}
+			t.Cleanup(func() { _ = w.Close() })
+
+			registered := map[string]bool{}
+			for _, f := range restore.StateDBFiles() {
+				registered[f] = true
+			}
+			var got []string
+			for _, s := range w.StateStores() {
+				if s.Store == nil || reflect.ValueOf(s.Store).IsNil() {
+					t.Errorf("StateStores lists %s with a nil store", s.File)
+				}
+				if !registered[s.File] {
+					t.Errorf("StateStores lists %s, which restore.StateDBFiles does not capture", s.File)
+				}
+				got = append(got, s.File)
+			}
+			if !reflect.DeepEqual(got, tc.wantFiles) {
+				t.Errorf("StateStores files = %v, want %v", got, tc.wantFiles)
+			}
+
+			// Release every store and delete its files, then reopen one store
+			// at a time: the file named by its label must be the one that
+			// comes back.
+			for _, s := range w.StateStores() {
+				if err := s.Store.PauseForSwap(); err != nil {
+					t.Fatalf("PauseForSwap %s: %v", s.File, err)
+				}
+			}
+			for _, f := range restore.StateDBFiles() {
+				for _, suffix := range []string{"", "-wal", "-shm"} {
+					if err := os.Remove(filepath.Join(storageDir, f+suffix)); err != nil && !os.IsNotExist(err) {
+						t.Fatalf("remove %s%s: %v", f, suffix, err)
+					}
+				}
+			}
+			for _, s := range w.StateStores() {
+				if err := s.Store.Replace(storageDir); err != nil {
+					t.Fatalf("Replace %s: %v", s.File, err)
+				}
+				if _, err := os.Stat(filepath.Join(storageDir, s.File)); err != nil {
+					t.Errorf("StateStores lists %s, but its store does not open that file: %v", s.File, err)
+				}
+			}
+		})
+	}
+}
+
+// Share links are experimental and off by default: with the flag off no
+// share_links.db may be created, with it on the file exists and the service is
+// reachable through the registered store.
+func TestNewWiki_ShareLinksFlag_ControlsDatabaseFile(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		dir := t.TempDir()
+		w, err := NewWiki(&WikiOptions{
+			StorageDir:          dir,
+			AdminPassword:       "adminpassword",
+			JWTSecret:           "secretkey",
+			AccessTokenTimeout:  15 * time.Minute,
+			RefreshTokenTimeout: 7 * 24 * time.Hour,
+			EnableShareLinks:    enabled,
+		})
+		if err != nil {
+			t.Fatalf("NewWiki(enabled=%v): %v", enabled, err)
+		}
+		_, statErr := os.Stat(filepath.Join(dir, "share_links.db"))
+		if enabled && statErr != nil {
+			t.Errorf("flag on: share_links.db missing: %v", statErr)
+		}
+		if !enabled && !os.IsNotExist(statErr) {
+			t.Errorf("flag off: share_links.db must not exist, stat err = %v", statErr)
+		}
+		// Close must be safe, and repeatable, in both modes.
+		if err := w.Close(); err != nil {
+			t.Errorf("Close(enabled=%v): %v", enabled, err)
+		}
+	}
 }

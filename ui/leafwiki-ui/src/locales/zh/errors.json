@@ -1,5 +1,4 @@
 {
-  "account locked": "登录失败次数过多，请 15 分钟后再试。",
   "admin user cannot be deleted": "管理员账户不能被删除",
   "api key not found": "未找到 API 密钥",
   "api key request failed": "API 密钥请求失败",
@@ -13,10 +12,12 @@
   "authentication is disabled": "认证已关闭",
   "authentication request failed": "认证请求失败",
   "avatar file too large": "头像文件过大",
+  "avatar image is %sx%s pixels (allowed: up to %s pixels in total)": "头像图片为 %sx%s 像素（最多允许共 %s 像素）",
   "avatar request failed": "头像请求失败",
   "failed to decode avatar image": "头像图片解码失败",
   "failed to delete avatar": "删除头像失败",
   "failed to encode avatar image": "头像图片编码失败",
+  "failed to persist toc-display config": "无法保存目录设置",
   "failed to save avatar file": "头像文件保存失败",
   "invalid avatar file type %s (allowed: %s)": "无效的头像文件类型 %s（允许：%s）",
   "invalid user id for avatar delete": "无效的头像请求",
@@ -99,6 +100,7 @@
   "a sync is already in progress": "同步已在进行中",
   "resync request failed": "重新同步请求失败",
   "search is currently unavailable": "搜索当前不可用",
+  "search query is too long: at most %s characters and %s terms": "搜索查询过长：最多 %s 个字符和 %s 个词",
   "title query param is required": "需要 title 查询参数",
   "TOTP is already enabled for this account": "两步验证已启用",
   "TOTP is not enabled for this account": "两步验证未启用",
@@ -109,5 +111,8 @@
   "user not found": "未找到用户",
   "zip entry exceeds the per-file size limit": "上传压缩包内的某个文件过大",
   "decompressed zip contents exceed the total size limit": "上传压缩包解压后过大",
-  "zip entry's decompression ratio exceeds the allowed maximum": "上传压缩包疑似解压炸弹"
+  "zip entry's decompression ratio exceeds the allowed maximum": "上传压缩包疑似解压炸弹",
+  "invalid page content width": "无效的页面宽度",
+  "failed to update page display setting": "无法更新显示设置",
+  "zip archive contains more entries than allowed": "上传压缩包包含的文件过多"
 }

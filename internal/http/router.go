@@ -2,10 +2,10 @@ package http
 
 import (
 	"embed"
-	"html"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +18,9 @@ import (
 	auth_middleware "github.com/perber/wiki/internal/http/middleware/auth"
 	"github.com/perber/wiki/internal/http/middleware/maintenance"
 	"github.com/perber/wiki/internal/http/middleware/security"
+	"github.com/perber/wiki/internal/pagedisplay"
 	"github.com/perber/wiki/internal/publicaccess"
 	"github.com/perber/wiki/internal/restore"
-	"github.com/perber/wiki/internal/tocdisplay"
 )
 
 //go:embed dist/**
@@ -51,24 +51,54 @@ func (sew *slogErrorWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-func slogRequestLogger() gin.HandlerFunc {
+func slogRequestLogger(capabilities *capabilityPrefixes) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
-		path := c.Request.URL.Path
-		if raw := c.Request.URL.RawQuery; raw != "" {
-			path += "?" + raw
-		}
-
 		c.Next()
 
 		slog.Default().Info("http request",
 			"method", c.Request.Method,
-			"path", path,
+			"path", loggedPath(c, capabilities),
 			"status", c.Writer.Status(),
 			"latency", time.Since(start),
 			"ip", c.ClientIP(),
 		)
 	}
+}
+
+// loggedPath is the path written to the access log. A capability URL carries
+// its secret in the path, so it is logged as its route template, or as its
+// prefix when no route matched; its query string is dropped.
+func loggedPath(c *gin.Context, capabilities *capabilityPrefixes) string {
+	if c.GetBool(capabilityRequestKey) && c.FullPath() != "" {
+		return c.FullPath()
+	}
+	if prefix := capabilities.match(c.Request.URL.Path); prefix != "" {
+		return prefix + "/…"
+	}
+	path := c.Request.URL.Path
+	if raw := c.Request.URL.RawQuery; raw != "" {
+		path += "?" + redactLoggedQuery(raw)
+	}
+	return path
+}
+
+// redactLoggedQuery replaces the value of the token query parameter, which
+// carries the secret of invite and password-reset links (see
+// auth.EmailTokenService.buildLink), so the request log never holds a usable
+// link. A query without a token is logged exactly as sent. One with a token
+// is re-encoded with sorted keys. A query that doesn't parse is re-encoded
+// too, because a token may hide in the part that failed to parse.
+func redactLoggedQuery(raw string) string {
+	values, err := url.ParseQuery(raw)
+	_, hasToken := values["token"]
+	if !hasToken && err == nil {
+		return raw
+	}
+	if hasToken {
+		values.Set("token", "REDACTED")
+	}
+	return values.Encode()
 }
 
 func disableClientCache(c *gin.Context) {
@@ -96,11 +126,12 @@ type RouterOptions struct {
 	// every page), read per request so it can be toggled at runtime with no
 	// restart. nil is treated as a fixed-false provider. See internal/publicaccess.
 	PublicAccess publicaccess.Provider
-	// AlwaysShowToc is the current "always show table of contents" state
-	// (show the TOC panel/dropdown regardless of heading count), read per
-	// request so it can be toggled at runtime with no restart. nil is
-	// treated as a fixed-false provider. See internal/tocdisplay.
-	AlwaysShowToc           tocdisplay.Provider
+	// PageDisplay holds the instance-wide page display settings (e.g.
+	// "always show table of contents"), read per request so an admin can
+	// change them at runtime with no restart. /api/config exposes all of
+	// them. nil is treated as a provider of the zero settings. See
+	// internal/pagedisplay.
+	PageDisplay             pagedisplay.Provider
 	EditorLimit             int                      // Max admin+editor users allowed; 0 = unlimited
 	InjectCodeInHeader      string                   // Raw HTML/JS code to inject into the <head> tag
 	CustomStylesheet        string                   // Path to a custom CSS file (resolved by wiki before passing)
@@ -125,11 +156,22 @@ type RouterOptions struct {
 	HTTPRemoteUser          HTTPRemoteUserConfig     // Reverse-proxy authentication via HTTP header
 	APIKeyService           *coreauth.APIKeyService  // Bearer API-key authentication; nil disables the feature
 	DisableRequestLog       bool                     // Whether to suppress per-request access log lines
+	DisableSecurityHeaders  bool                     // Whether to omit the security response headers and the shell's CSP (ADR-0024)
 	UserManagementURL       string                   // Optional URL; when set, the frontend replaces in-app user management with a link to this URL
 	DefaultLanguage         string                   // Optional default UI language code (e.g. "de"); frontend applies it only if it matches a language it ships
 	LoginURL                string                   // Optional URL the frontend redirects to instead of showing the built-in login form
 	LogoutURL               string                   // Optional URL the frontend redirects to after logout
 	WriteGate               *restore.WriteGate       // Optional; when set, gates mutating requests while a restore is in progress. nil disables the middleware entirely (no snapshot/restore enabled)
+
+	// TrustedProxies are the proxies whose X-Forwarded-For is believed when
+	// resolving the client address (logs, per-client limits). nil trusts nobody,
+	// so the client address is the TCP peer. Same list as HTTPRemoteUser.TrustedProxies.
+	TrustedProxies *auth_middleware.TrustedProxies
+
+	// UnixSocket is true when the server listens on a unix socket instead of
+	// TCP. gin trusts every unix-socket peer, so the client address is then
+	// read from X-Forwarded-For only if TrustedProxies is not empty.
+	UnixSocket bool
 }
 
 // FrontendConfig carries the minimal runtime data required to serve the embedded SPA.
@@ -143,6 +185,12 @@ type FrontendConfig struct {
 	CustomStylesheetPath string
 	// StorageDir is used to validate that CustomStylesheet in RouterOptions is within the storage dir.
 	StorageDir string
+	// ShellResponders may answer SPA requests instead of the shell; the first
+	// that handles a request wins. See shell.go for the contract.
+	ShellResponders []ShellResponder
+	// ShellContributors add title, head and body markup to the SPA shell, in
+	// this order, before the built-in custom stylesheet and InjectCodeInHeader.
+	ShellContributors []ShellContributor
 }
 
 // NewRouter creates the HTTP engine, builds the shared RouterContext, delegates all
@@ -156,8 +204,8 @@ func NewRouter(registrars []RouteRegistrar, frontendCfg FrontendConfig, opts Rou
 		opts.PublicAccess = publicaccess.Fixed(false)
 	}
 
-	if opts.AlwaysShowToc == nil {
-		opts.AlwaysShowToc = tocdisplay.Fixed(false)
+	if opts.PageDisplay == nil {
+		opts.PageDisplay = pagedisplay.Fixed(pagedisplay.Settings{})
 	}
 
 	if Environment == "production" {
@@ -172,14 +220,24 @@ func NewRouter(registrars []RouteRegistrar, frontendCfg FrontendConfig, opts Rou
 	authCookies := auth_middleware.NewAuthCookies(opts.AllowInsecure, opts.AccessTokenTimeout, opts.RefreshTokenTimeout)
 	csrfCookie := security.NewCSRFCookie(opts.AllowInsecure, 3*24*time.Hour)
 
+	capabilities := &capabilityPrefixes{}
 	engine := gin.New()
+	if err := configureClientAddress(engine, opts.TrustedProxies, opts.UnixSocket); err != nil {
+		panic("failed to configure the trusted proxies: " + err.Error())
+	}
 	if !opts.DisableRequestLog {
-		engine.Use(slogRequestLogger())
+		engine.Use(slogRequestLogger(capabilities))
 	}
 	if opts.Metrics != nil {
 		engine.Use(opts.Metrics.Middleware())
 	}
 	engine.Use(gin.RecoveryWithWriter(gin.DefaultErrorWriter))
+	engine.Use(warnOnUntrustedForwarding(slog.Default(), opts.TrustedProxies))
+	if !opts.DisableSecurityHeaders {
+		// On the engine, not on a group: some slices build their /api groups
+		// from ctx.Base directly, and NoRoute responses need the headers too.
+		engine.Use(security.Headers(security.HeadersConfig{NosniffExemptPrefix: opts.BasePath + "/static/"}))
+	}
 	base := engine.Group(opts.BasePath)
 
 	if opts.WriteGate != nil {
@@ -218,11 +276,12 @@ func NewRouter(registrars []RouteRegistrar, frontendCfg FrontendConfig, opts Rou
 	}
 
 	ctx := RouterContext{
-		Engine:      engine,
-		Base:        base,
-		AuthCookies: authCookies,
-		CSRFCookie:  csrfCookie,
-		Opts:        opts,
+		Engine:       engine,
+		Base:         base,
+		AuthCookies:  authCookies,
+		CSRFCookie:   csrfCookie,
+		Opts:         opts,
+		capabilities: capabilities,
 	}
 
 	for _, r := range registrars {
@@ -244,7 +303,7 @@ func NewRouter(registrars []RouteRegistrar, frontendCfg FrontendConfig, opts Rou
 	// Serve custom stylesheet if a valid path was provided.
 	if customStylesheetPath != "" {
 		cssPath := customStylesheetPath
-		base.GET("/custom.css", func(c *gin.Context) {
+		base.Match(GetAndHead, "/custom.css", func(c *gin.Context) {
 			if _, err := os.Stat(cssPath); os.IsNotExist(err) {
 				c.Status(http.StatusNotFound)
 				return
@@ -258,7 +317,8 @@ func NewRouter(registrars []RouteRegistrar, frontendCfg FrontendConfig, opts Rou
 		})
 	}
 
-	// Serve the embedded frontend SPA on all unknown routes.
+	// Unknown routes: shell responders, then the embedded SPA shell (see shell.go).
+	shell := newShellHandler(frontendCfg, opts, customStylesheetPath)
 	if EmbedFrontend == "true" {
 		fsys, err := fs.Sub(frontend, "dist")
 		if err != nil {
@@ -271,76 +331,25 @@ func NewRouter(registrars []RouteRegistrar, frontendCfg FrontendConfig, opts Rou
 
 		base.StaticFS("/static", http.FS(staticFS))
 
-		base.GET("/favicon.svg", func(c *gin.Context) {
+		base.Match(GetAndHead, "/favicon.svg", func(c *gin.Context) {
 			disableClientCache(c)
 			// favicon is served by the branding registrar if a custom one exists;
 			// fall back to the default leaf SVG.
 			c.Data(http.StatusOK, "image/svg+xml", []byte(DefaultFaviconSVG))
 		})
 
-		indexData, indexErr := fs.ReadFile(fsys, "index.html")
-		indexTemplate := string(indexData)
-
-		engine.NoRoute(func(c *gin.Context) {
-			path := c.Request.URL.Path
-			if opts.BasePath != "" {
-				if path != opts.BasePath && !strings.HasPrefix(path, opts.BasePath+"/") {
-					c.String(http.StatusNotFound, "Page not found")
-					return
-				}
-				path = strings.TrimPrefix(path, opts.BasePath)
-				if path == "" {
-					path = "/"
-				}
-			}
-
-			if c.Request.Method == http.MethodGet &&
-				!strings.HasPrefix(path, "/api") &&
-				!strings.HasPrefix(path, "/assets") &&
-				!strings.HasPrefix(path, "/static") &&
-				!strings.HasPrefix(path, "/branding") {
-
-				c.Writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-				if indexErr != nil {
-					c.Status(http.StatusNotFound)
-					return
-				}
-
-				siteName := "LeafWiki"
-				if frontendCfg.GetSiteName != nil {
-					if name := frontendCfg.GetSiteName(); name != "" {
-						siteName = name
-					}
-				}
-				faviconFile := ""
-				if frontendCfg.GetFaviconFile != nil {
-					faviconFile = frontendCfg.GetFaviconFile()
-				}
-
-				doc := indexTemplate
-				escapedBasePath := html.EscapeString(opts.BasePath)
-				doc = strings.ReplaceAll(doc, "{{__SITE_NAME__}}", html.EscapeString(siteName))
-				doc = strings.ReplaceAll(doc, "{{__BASE_PATH__}}", escapedBasePath)
-				doc = strings.ReplaceAll(doc, "{{__FAVICON_HREF__}}", html.EscapeString(BuildFrontendFaviconHref(opts.BasePath, faviconFile)))
-				// Rewrite Vite's relative "./static/" asset references to absolute paths
-				// so they resolve correctly when index.html is served for deep SPA routes.
-				// Lazy chunks still use import.meta.url for their own path resolution.
-				doc = strings.ReplaceAll(doc, `"./static/`, `"`+escapedBasePath+`/static/`)
-
-				doc = injectIntoHead(doc, buildCustomStylesheetTag(opts.BasePath, customStylesheetPath))
-
-				if opts.InjectCodeInHeader != "" {
-					doc = injectIntoHead(doc, opts.InjectCodeInHeader)
-				}
-				c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(doc))
-			} else {
-				c.String(http.StatusNotFound, "Page not found")
-			}
-		})
+		shell.setIndex(fs.ReadFile(fsys, "index.html"))
 	}
+	engine.NoRoute(shell.serve)
 
 	return engine
 }
+
+// GetAndHead registers a route for GET and HEAD. Use it for every non-API GET
+// route outside the reserved prefixes (/api, /assets, /static, /branding):
+// registered for GET only, HEAD falls through to the SPA shell, which answers
+// HEAD like GET with the shell's 200 text/html.
+var GetAndHead = []string{http.MethodGet, http.MethodHead}
 
 func BuildFrontendFaviconHref(basePath, faviconFile string) string {
 	if faviconFile != "" {

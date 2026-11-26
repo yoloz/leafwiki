@@ -59,3 +59,13 @@ git-backup and reverse-proxy-auth features already made.
   `cmd/leafwiki/flags_email.go` and read their env var via `Sources: envVars(...)` instead of the
   `resolveString`/`resolveBool`/`resolveDuration` helpers. `validateSMTPConfig` is still in
   `cmd/leafwiki/main.go`. The decision (CLI/ENV only, no UI) is unchanged.
+- **2026-10 (#1292, `--public-url` moved):** `--public-url` is now a server flag
+  (`cmd/leafwiki/flags_server.go`), because it describes the wiki itself, not the mail
+  transport. Password-reset and invite emails still require it when `--smtp-host` is set and it
+  is validated the same way. Search-engine rendering uses it as the only source for canonical
+  links and sitemap URLs ([ADR-0018](./0018-search-engine-rendering-for-public-wikis.md)).
+- **2026-10 (#1292, `--public-url` checked without SMTP):** `validatePublicURL` checks the
+  value whether or not SMTP is configured. With `--smtp-host` an invalid value is still a
+  startup error with the same message; without it the value is ignored with a warning. A path
+  that differs from `--base-path` logs a warning. A password in the URL is redacted in logs and
+  errors.

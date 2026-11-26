@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	sharederrors "github.com/perber/wiki/internal/core/shared/errors"
+	"github.com/perber/wiki/internal/pagedisplay"
 	"github.com/perber/wiki/internal/publicaccess"
 )
 
@@ -53,10 +54,10 @@ func respondWithError(c *gin.Context, err error) {
 }
 
 func statusForCode(code string) int {
-	switch code {
-	case publicaccess.ErrCodeEnvManaged:
+	switch {
+	case code == publicaccess.ErrCodeEnvManaged:
 		return http.StatusConflict
-	case ErrCodeInvalidPayload:
+	case code == ErrCodeInvalidPayload, pagedisplay.IsInvalidInput(code):
 		return http.StatusBadRequest
 	default:
 		return http.StatusInternalServerError

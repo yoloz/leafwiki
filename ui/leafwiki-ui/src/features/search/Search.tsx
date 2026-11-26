@@ -9,6 +9,7 @@ import {
   AccordionTrigger,
 } from '@/components/ui/accordion'
 import { Input } from '@/components/ui/input'
+import { asApiLocalizedError, mapApiError } from '@/lib/api/errors'
 import { searchPages, SearchResultItem, SearchTagFacet } from '@/lib/api/search'
 import { deferStateUpdate } from '@/lib/deferState'
 import { normalizeWikiRoutePath } from '@/lib/wikiPath'
@@ -21,12 +22,18 @@ import {
   startTransition,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
 } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import SearchResultCard from './SearchResultCard'
+import {
+  SearchSyntaxHelpButton,
+  SearchSyntaxHelpPanel,
+} from './SearchSyntaxHelp'
+import { useCloseSyntaxHelpOnEscape } from './useCloseSyntaxHelpOnEscape'
 
 type SearchProps = {
   active?: boolean
@@ -43,6 +50,18 @@ const SEARCH_INPUT_ALLOWED_HOTKEYS = [
   getShortcutDefinition('sidebar.search.open').keyCombo,
 ].join(' ')
 
+// Shorter queries are not sent: a single character would prefix-match
+// almost every page, while two already cover common wiki words (Pi, HR,
+// IP, Go, C#).
+const MIN_QUERY_LENGTH = 2
+
+// The backend rejects longer queries (search_query_too_long); the term cap
+// it also enforces can only be checked there, after parsing.
+const MAX_QUERY_LENGTH = 256
+
+const isSearchableQuery = (query: string) =>
+  query.trim().length >= MIN_QUERY_LENGTH
+
 export default function Search({ active = false }: SearchProps) {
   const location = useLocation()
   const navigate = useNavigate()
@@ -54,7 +73,7 @@ export default function Search({ active = false }: SearchProps) {
   const debouncedActiveTagsKey = useDebounce(activeTagsKey, 180)
 
   const [loading, setLoading] = useState(
-    () => urlQuery.length >= 3 || activeTags.length > 0,
+    () => isSearchableQuery(urlQuery) || activeTags.length > 0,
   )
   const [results, setResults] = useState<SearchResultItem[]>([])
   const [totalCount, setTotalCount] = useState(0)
@@ -63,12 +82,33 @@ export default function Search({ active = false }: SearchProps) {
   const [availableTags, setAvailableTags] = useState<TagCount[]>([])
   const [availableTagsError, setAvailableTagsError] = useState(false)
   const [facetTags, setFacetTags] = useState<SearchTagFacet[]>([])
+  // The localized search_query_too_long message and the query it answered.
+  // It is shown only while the input still holds that query, so any change
+  // (typing, the clear button, a new q in the URL) hides it.
+  const [queryLimitError, setQueryLimitError] = useState<{
+    query: string
+    message: string
+  } | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  // Like the query and the tag accordion, the help panel keeps its state
+  // while the sidebar shows another panel (Search stays mounted, hidden).
+  const [syntaxHelpOpen, setSyntaxHelpOpen] = useState(false)
+  const syntaxHelpPanelId = useId()
+  const syntaxHelpButtonRef = useRef<HTMLButtonElement | null>(null)
+  useCloseSyntaxHelpOnEscape({
+    enabled: syntaxHelpOpen && active,
+    setOpen: setSyntaxHelpOpen,
+    buttonRef: syntaxHelpButtonRef,
+  })
   const searchFocusRequestId = useSidebarStore(
     (state) => state.searchFocusRequestId,
   )
   const resultRefs = useRef<(HTMLAnchorElement | null)[]>([])
   const latestRequestIdRef = useRef(0)
+  // Bumped when a keystroke invalidates the pending request but leaves the
+  // debounced query unchanged ("Pi" -> "P" -> "Pi" within the debounce), so
+  // the request effect still runs and settles the loading state.
+  const [retypedQueryCount, setRetypedQueryCount] = useState(0)
 
   const limit = 10
   const debouncedQuery = useDebounce(inputQuery, 300)
@@ -77,13 +117,26 @@ export default function Search({ active = false }: SearchProps) {
       debouncedActiveTagsKey === '' ? [] : debouncedActiveTagsKey.split('\n'),
     [debouncedActiveTagsKey],
   )
-  const hasSearchQuery = debouncedQuery.length >= 3
+  const hasSearchQuery = isSearchableQuery(debouncedQuery)
   const trimmedQuery = inputQuery.trim()
-  const activeQueryLabel = hasSearchQuery ? debouncedQuery : trimmedQuery
+  const isQueryTooShort = trimmedQuery !== '' && !isSearchableQuery(inputQuery)
+  const activeQueryLabel = isQueryTooShort
+    ? ''
+    : hasSearchQuery
+      ? debouncedQuery
+      : trimmedQuery
   const isIdleMode = trimmedQuery === '' && activeTags.length === 0
-  const hasImmediateFilters = !isIdleMode
+  // A too-short query on its own filters nothing; the hint replaces the
+  // result list instead of an empty or stale one.
+  const hasImmediateFilters =
+    !isIdleMode && (!isQueryTooShort || activeTags.length > 0)
   const hasDebouncedFilters = hasSearchQuery || debouncedActiveTags.length > 0
   const hasResults = results.length > 0
+  const queryLimitMessage =
+    queryLimitError?.query === inputQuery ? queryLimitError.message : null
+  // A rejected over-long query shows its limit in the status region instead.
+  const showNoResults =
+    !loading && hasImmediateFilters && !queryLimitMessage && !hasResults
   const clampedActiveIndex =
     results.length === 0 ? 0 : Math.min(activeIndex, results.length - 1)
   const visibleTags = isIdleMode ? availableTags : facetTags
@@ -151,7 +204,7 @@ export default function Search({ active = false }: SearchProps) {
     )
     setPage(0)
     setActiveIndex(0)
-    if (urlQuery.trim().length < 3) {
+    if (!isSearchableQuery(urlQuery)) {
       setResults([])
       setTotalCount(0)
       setFacetTags([])
@@ -222,21 +275,28 @@ export default function Search({ active = false }: SearchProps) {
     const requestId = latestRequestIdRef.current + 1
     latestRequestIdRef.current = requestId
 
-    searchPages(
-      hasSearchQuery ? debouncedQuery : '',
-      page * limit,
-      limit,
-      debouncedActiveTags,
-    )
+    const sentQuery = hasSearchQuery ? debouncedQuery : ''
+    searchPages(sentQuery, page * limit, limit, debouncedActiveTags)
       .then((data) => {
         if (latestRequestIdRef.current !== requestId) return
+        setQueryLimitError(null)
         setResults(data.items || [])
         setTotalCount(data.count)
         setFacetTags(data.tag_facets || [])
       })
       .catch((err) => {
         if (latestRequestIdRef.current !== requestId) return
-        console.error('Search failed', err)
+        const localized = asApiLocalizedError(err)
+        if (localized?.code === 'search_query_too_long') {
+          // An expected answer to user input, shown in the panel; not an
+          // error to log (ADR-0008).
+          setQueryLimitError({
+            query: sentQuery,
+            message: mapApiError(localized, localized.message).message,
+          })
+        } else {
+          console.error('Search failed', err)
+        }
         setResults([])
         setTotalCount(0)
         setFacetTags([])
@@ -251,6 +311,7 @@ export default function Search({ active = false }: SearchProps) {
     hasDebouncedFilters,
     hasSearchQuery,
     page,
+    retypedQueryCount,
   ])
 
   const clearSearch = () => {
@@ -291,82 +352,98 @@ export default function Search({ active = false }: SearchProps) {
 
   return (
     <div className="search">
-      <div className="search__input-wrapper">
-        <Input
-          ref={searchInputRef}
-          autoFocus
-          type="text"
-          placeholder={t('input.placeholder')}
-          value={inputQuery}
-          data-testid="search-input"
-          data-allow-hotkeys={SEARCH_INPUT_ALLOWED_HOTKEYS}
-          onChange={(e) => {
-            const nextQuery = e.target.value
-            invalidatePendingRequests()
-            setInputQuery(nextQuery)
-            startTransition(() => {
-              setSearchParams(
-                (prev) => {
-                  const next = new URLSearchParams(prev)
-                  if (nextQuery) {
-                    next.set('q', nextQuery)
-                  } else {
-                    next.delete('q')
-                  }
-                  return next
-                },
-                { replace: true },
-              )
-            })
-            setPage(0)
-            setActiveIndex(0)
+      <div className="search__input-row">
+        <div className="search__input-wrapper">
+          <Input
+            ref={searchInputRef}
+            autoFocus
+            type="text"
+            placeholder={t('input.placeholder')}
+            value={inputQuery}
+            maxLength={MAX_QUERY_LENGTH}
+            data-testid="search-input"
+            data-allow-hotkeys={SEARCH_INPUT_ALLOWED_HOTKEYS}
+            onChange={(e) => {
+              const nextQuery = e.target.value
+              invalidatePendingRequests()
+              setInputQuery(nextQuery)
+              startTransition(() => {
+                setSearchParams(
+                  (prev) => {
+                    const next = new URLSearchParams(prev)
+                    if (nextQuery) {
+                      next.set('q', nextQuery)
+                    } else {
+                      next.delete('q')
+                    }
+                    return next
+                  },
+                  { replace: true },
+                )
+              })
+              setPage(0)
+              setActiveIndex(0)
 
-            if (nextQuery.length >= 3 || activeTags.length > 0) {
-              setLoading(true)
-            } else {
-              setResults([])
-              setTotalCount(0)
-              setFacetTags([])
-              setLoading(false)
-            }
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'ArrowDown') {
-              if (!hasResults) return
+              if (isSearchableQuery(nextQuery) || activeTags.length > 0) {
+                setLoading(true)
+                if (nextQuery === debouncedQuery) {
+                  setRetypedQueryCount((count) => count + 1)
+                }
+              } else {
+                setResults([])
+                setTotalCount(0)
+                setFacetTags([])
+                setLoading(false)
+              }
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowDown') {
+                if (!hasResults) return
 
-              e.preventDefault()
-              setActiveIndex((current) =>
-                Math.min(current + 1, Math.max(results.length - 1, 0)),
-              )
-            }
+                e.preventDefault()
+                setActiveIndex((current) =>
+                  Math.min(current + 1, Math.max(results.length - 1, 0)),
+                )
+              }
 
-            if (e.key === 'ArrowUp') {
-              if (!hasResults) return
+              if (e.key === 'ArrowUp') {
+                if (!hasResults) return
 
-              e.preventDefault()
-              setActiveIndex((current) => Math.max(current - 1, 0))
-            }
+                e.preventDefault()
+                setActiveIndex((current) => Math.max(current - 1, 0))
+              }
 
-            if (e.key === 'Enter') {
-              if (!hasResults) return
+              if (e.key === 'Enter') {
+                if (!hasResults) return
 
-              e.preventDefault()
-              openActiveResult()
-            }
-          }}
-          className="search__input"
+                e.preventDefault()
+                openActiveResult()
+              }
+            }}
+            // pr-8 keeps long queries clear of the clear button. It is a
+            // utility here because the Input's own px-3 is one and would beat
+            // padding set in .search__input (components layer).
+            className="search__input pr-8"
+          />
+          {inputQuery && (
+            <button
+              onClick={clearSearch}
+              className="search__clear-button"
+              title={t('input.clearButton')}
+              data-testid="search-clear-button"
+            >
+              <X size={16} />
+            </button>
+          )}
+        </div>
+        <SearchSyntaxHelpButton
+          ref={syntaxHelpButtonRef}
+          open={syntaxHelpOpen}
+          panelId={syntaxHelpPanelId}
+          onToggle={() => setSyntaxHelpOpen((open) => !open)}
         />
-        {inputQuery && (
-          <button
-            onClick={clearSearch}
-            className="search__clear-button"
-            title={t('input.clearButton')}
-            data-testid="search-clear-button"
-          >
-            <X size={16} />
-          </button>
-        )}
       </div>
+      <SearchSyntaxHelpPanel id={syntaxHelpPanelId} open={syntaxHelpOpen} />
 
       {(visibleTags.length > 0 || availableTagsError) && (
         <Accordion
@@ -431,6 +508,22 @@ export default function Search({ active = false }: SearchProps) {
       )}
 
       <div className="search__body">
+        {/* Always rendered so screen readers announce the hint when its
+            text appears; a live region inserted with its text is often
+            missed. */}
+        <p role="status" className="search__min-length-hint">
+          {isQueryTooShort && (
+            <span data-testid="search-min-length-hint">
+              {t('input.minLengthHint', { count: MIN_QUERY_LENGTH })}
+            </span>
+          )}
+          {queryLimitMessage && (
+            <span data-testid="search-query-limit-hint">
+              {queryLimitMessage}
+            </span>
+          )}
+        </p>
+
         {hasImmediateFilters && (
           <div className="browse-results__toolbar">
             <ListViewStatus className="search__result-summary">
@@ -475,7 +568,7 @@ export default function Search({ active = false }: SearchProps) {
           </ListView>
         )}
 
-        {!loading && hasImmediateFilters && results.length === 0 && (
+        {showNoResults && (
           <ListView
             as="div"
             className="search__results-view"

@@ -1,5 +1,4 @@
 {
-  "account locked": "Trop de tentatives de connexion échouées. Veuillez réessayer dans 15 minutes.",
   "admin user cannot be deleted": "L'utilisateur administrateur ne peut pas être supprimé",
   "api key not found": "Clé API introuvable",
   "api key request failed": "Échec de la requête de clé API",
@@ -13,10 +12,12 @@
   "authentication is disabled": "L'authentification est désactivée",
   "authentication request failed": "Échec de la requête d'authentification",
   "avatar file too large": "Fichier d'avatar trop volumineux",
+  "avatar image is %sx%s pixels (allowed: up to %s pixels in total)": "L'image d'avatar fait %sx%s pixels (autorisé : jusqu'à %s pixels au total)",
   "avatar request failed": "Échec de la requête d'avatar",
   "failed to decode avatar image": "Impossible de décoder l'image d'avatar",
   "failed to delete avatar": "Impossible de supprimer l'avatar",
   "failed to encode avatar image": "Impossible d'encoder l'image d'avatar",
+  "failed to persist toc-display config": "Impossible d'enregistrer le paramètre de la table des matières",
   "failed to save avatar file": "Impossible d'enregistrer le fichier d'avatar",
   "invalid avatar file type %s (allowed: %s)": "Type de fichier d'avatar invalide %s (autorisés : %s)",
   "invalid user id for avatar delete": "Requête d'avatar invalide",
@@ -99,6 +100,7 @@
   "a sync is already in progress": "Une synchronisation est déjà en cours",
   "resync request failed": "Échec de la requête de resynchronisation",
   "search is currently unavailable": "La recherche est actuellement indisponible",
+  "search query is too long: at most %s characters and %s terms": "La recherche est trop longue : %s caractères et %s termes au maximum",
   "title query param is required": "Le paramètre de requête titre est requis",
   "TOTP is already enabled for this account": "L'authentification à deux facteurs est déjà activée",
   "TOTP is not enabled for this account": "L'authentification à deux facteurs n'est pas activée",
@@ -109,5 +111,8 @@
   "user not found": "Utilisateur introuvable",
   "zip entry exceeds the per-file size limit": "Un fichier dans l'archive téléversée est trop volumineux",
   "decompressed zip contents exceed the total size limit": "L'archive téléversée est trop volumineuse une fois décompressée",
-  "zip entry's decompression ratio exceeds the allowed maximum": "L'archive téléversée ressemble à une bombe de décompression"
+  "zip entry's decompression ratio exceeds the allowed maximum": "L'archive téléversée ressemble à une bombe de décompression",
+  "invalid page content width": "Largeur de page non valide",
+  "failed to update page display setting": "Impossible de mettre à jour le paramètre d'affichage",
+  "zip archive contains more entries than allowed": "L'archive téléversée contient trop de fichiers"
 }

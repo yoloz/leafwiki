@@ -30,6 +30,23 @@ jobs:
         with:
           version-file: .golangci-lint-version
           args: --timeout=5m
+
+  # Unreachable functions (#1766); see the deadcode target in the Makefile.
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Find unreachable functions
+        run: make deadcode
     
   # linux/386 is a release target. Building alone isn't enough: 32-bit-only
   # runtime bugs (e.g. unaligned 64-bit atomics) compile fine and only panic
@@ -54,6 +71,32 @@ jobs:
           GOOS: linux
           GOARCH: '386'
         run: make test
+
+  # Windows is a release target; build-go-cross only compiles for it, which
+  # can't catch filesystem differences (#1698).
+  test-go-windows:
+    runs-on: windows-latest
+    # Guard against a hung test; the go test timeout below fires first.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: go mod download
+
+      # File I/O on the Windows runner is several times slower than on Linux:
+      # internal/http alone takes 7-8 min there, close to go test's default
+      # 10-minute per-package timeout, and a slow fsync tips it over.
+      - name: Run tests on windows/amd64
+        run: go test -timeout 20m ./...
 
   # windows/amd64 and darwin/arm64 are release targets, but the release
   # workflow is the only other place that builds them; without this a
@@ -83,6 +126,35 @@ jobs:
         env:
           CROSS_PLATFORM: ${{ matrix.platform }}
         run: make cross CROSS_PLATFORMS="$CROSS_PLATFORM"
+
+  # The experimental API specification is generated and committed. Regenerate
+  # on the host platform and fail if the committed files are stale. The
+  # generator runs only here, never inside the go test jobs.
+  api-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Generate API documentation
+        run: make api-docs
+
+      - name: Verify committed API documentation is up to date
+        run: git diff --exit-code -- docs/api
+
+      - name: Upload API documentation as artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: api-docs
+          path: |
+            docs/api/swagger.json
+            docs/api/swagger.yaml
+          if-no-files-found: error
 
   test-install-scripts:
     runs-on: ubuntu-latest
@@ -115,7 +187,7 @@ jobs:
           go tool cover -func=coverage/coverage.out
 
       - name: Upload coverage report as artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-report
           path: coverage/coverage.out

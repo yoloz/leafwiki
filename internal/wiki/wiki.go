@@ -21,7 +21,10 @@ import (
 	"github.com/perber/wiki/internal/links"
 	"github.com/perber/wiki/internal/llm"
 	"github.com/perber/wiki/internal/properties"
+	"github.com/perber/wiki/internal/publicaccess"
+	"github.com/perber/wiki/internal/restore"
 	"github.com/perber/wiki/internal/search"
+	"github.com/perber/wiki/internal/sharing"
 	"github.com/perber/wiki/internal/tags"
 	"github.com/perber/wiki/internal/usersettings"
 	wikiapikeys "github.com/perber/wiki/internal/wiki/apikeys"
@@ -40,6 +43,7 @@ import (
 	wikiresync "github.com/perber/wiki/internal/wiki/resync"
 	wikirevisions "github.com/perber/wiki/internal/wiki/revisions"
 	wikisearch "github.com/perber/wiki/internal/wiki/search"
+	wikishares "github.com/perber/wiki/internal/wiki/shares"
 	wikisnapshot "github.com/perber/wiki/internal/wiki/snapshot"
 	wikitags "github.com/perber/wiki/internal/wiki/tags"
 	wikiusersettings "github.com/perber/wiki/internal/wiki/usersettings"
@@ -52,6 +56,7 @@ type Wiki struct {
 	userResolver      *auth.UserResolver
 	user              *auth.UserService
 	apiKeys           *auth.APIKeyService
+	shareLinks        *sharing.ShareLinkService
 	totp              *auth.TOTPService
 	emailTokenStore   *auth.EmailTokenStore
 	emailTokenService *auth.EmailTokenService
@@ -61,6 +66,8 @@ type Wiki struct {
 	searchIndex       *search.SQLiteIndex
 	status            *search.IndexingStatus
 	storageDir        string
+	publicAccess      publicaccess.ReadGate
+	publicURL         string
 
 	// Domain route registrars (populated by NewWiki).
 	pagesRoutes            *wikipages.Routes
@@ -74,6 +81,7 @@ type Wiki struct {
 	brandingRoutes         *wikibranding.Routes
 	avatarRoutes           *wikiavatar.Routes
 	apiKeysRoutes          *wikiapikeys.Routes
+	sharesRoutes           *wikishares.Routes
 	importerRoutes         *wikiimporter.Routes
 	healthRoutes           *wikihealth.Routes
 	revision               *revision.Service
@@ -118,6 +126,7 @@ type WikiOptions struct {
 	AuthDisabled            bool          // Whether authentication is disabled
 	EnableRevision          bool          // Whether revision recording/storage is enabled
 	EnableAPIKeyManagement  bool          // Whether the experimental API key management feature is enabled
+	EnableShareLinks        bool          // Whether the experimental share links feature (#1252) is enabled
 	MaxRevisionHistory      int           // Max revisions kept per page; 0 = unlimited
 	EditorLimit             int           // Max admin+editor users allowed; 0 = unlimited
 	MaxAssetUploadSizeBytes int64         // Maximum allowed size in bytes for asset/import uploads; 0 = default
@@ -126,6 +135,13 @@ type WikiOptions struct {
 	SMTP                    email.Config  // SMTP config for password-reset/invite email; SMTP.Enabled()==false disables the feature entirely
 	LLM                     llm.Config    // OpenAI-compatible LLM config; only BaseURL+APIKey+Model all set enables the URL AI-generation feature
 	Metrics                 *httpmetrics.HTTPMetrics
+	// PublicAccess is the runtime public-access setting, read per request by
+	// features that serve anonymous visitors (search engine rendering). nil
+	// means public access is off.
+	PublicAccess publicaccess.ReadGate
+	// PublicURL is --public-url, already validated: the only source for
+	// absolute URLs such as canonical links (ADR-0018). "" means none.
+	PublicURL string
 }
 
 func NewWiki(options *WikiOptions) (*Wiki, error) {
@@ -138,6 +154,8 @@ func NewWiki(options *WikiOptions) (*Wiki, error) {
 		shutdownCancel: shutdownCancel,
 		metrics:        options.Metrics,
 		llmCfg:         options.LLM,
+		publicAccess:   options.PublicAccess,
+		publicURL:      options.PublicURL,
 	}
 	if err := w.boot(options); err != nil {
 		// Close what the steps before the failing one opened: a leaked
@@ -170,6 +188,9 @@ func (w *Wiki) boot(options *WikiOptions) error {
 		return err
 	}
 	if err := w.initFavoritesService(); err != nil {
+		return err
+	}
+	if err := w.initShareLinks(options); err != nil {
 		return err
 	}
 	if err := w.initUserSettingsService(); err != nil {
@@ -260,6 +281,32 @@ func (w *Wiki) UserSettingsService() *usersettings.UserSettingsService {
 	return w.userSettings
 }
 
+// ShareLinkService returns the share link service, or nil when share links
+// are disabled.
+func (w *Wiki) ShareLinkService() *sharing.ShareLinkService {
+	return w.shareLinks
+}
+
+// StateStores returns the state stores (other than users.db) that exist in
+// this process, for restore.Config.Stores. A store whose feature is off is
+// not listed; a nil pointer must never be wrapped in the interface.
+func (w *Wiki) StateStores() []restore.LiveStore {
+	var stores []restore.LiveStore
+	if w.apiKeys != nil {
+		stores = append(stores, restore.LiveStore{File: restore.APIKeysDBFile, Store: w.apiKeys})
+	}
+	if w.favorites != nil {
+		stores = append(stores, restore.LiveStore{File: restore.FavoritesDBFile, Store: w.favorites})
+	}
+	if w.userSettings != nil {
+		stores = append(stores, restore.LiveStore{File: restore.UserSettingsDBFile, Store: w.userSettings})
+	}
+	if w.shareLinks != nil {
+		stores = append(stores, restore.LiveStore{File: restore.ShareLinksDBFile, Store: w.shareLinks})
+	}
+	return stores
+}
+
 // EmailTokenService returns the password-reset/invite token service, or nil
 // if SMTP isn't configured or auth is disabled (see initEmail). Every use
 // case that resolves this via the func()-based pattern (like UserService)
@@ -331,6 +378,12 @@ func (w *Wiki) Close() error {
 	if w.favorites != nil {
 		if err := w.favorites.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close favorites store: %w", err))
+		}
+	}
+
+	if w.shareLinks != nil {
+		if err := w.shareLinks.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close share links store: %w", err))
 		}
 	}
 

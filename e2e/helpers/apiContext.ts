@@ -44,3 +44,62 @@ export async function createPageViaApi(
   expect(updated.ok(), `update page ${input.slug}`).toBeTruthy();
   return id as string;
 }
+
+// setAlwaysShowToc sets the instance-wide "always show TOC" setting as admin.
+export async function setAlwaysShowToc(alwaysShow: boolean) {
+  const api = await loggedIn();
+  const resp = await api.put('/api/admin/settings/toc-display', {
+    headers: await csrfHeader(api),
+    data: { alwaysShow },
+  });
+  expect(resp.status(), `set alwaysShowToc=${alwaysShow}`).toBe(200);
+  await api.dispose();
+}
+
+// setContentWidth sets the instance-wide page content width as admin.
+export async function setContentWidth(contentWidth: string) {
+  const api = await loggedIn();
+  const resp = await api.put('/api/admin/settings/content-width', {
+    headers: await csrfHeader(api),
+    data: { contentWidth },
+  });
+  expect(resp.status(), `set contentWidth=${contentWidth}`).toBe(200);
+  await api.dispose();
+}
+
+// setShowSubpageCount sets the instance-wide "show subpage count" display
+// setting as admin.
+export async function setShowSubpageCount(showSubpageCount: boolean) {
+  const api = await loggedIn();
+  const resp = await api.put('/api/admin/settings/display', {
+    headers: await csrfHeader(api),
+    data: { showSubpageCount },
+  });
+  expect(resp.status(), `set showSubpageCount=${showSubpageCount}`).toBe(200);
+  await api.dispose();
+}
+
+// setPublicAccess turns instance-wide anonymous read access on or off as admin.
+export async function setPublicAccess(enabled: boolean) {
+  const api = await loggedIn();
+  const resp = await api.put('/api/admin/settings/public-access', {
+    headers: await csrfHeader(api),
+    data: { enabled },
+  });
+  expect(resp.status(), `set publicAccess=${enabled}`).toBe(200);
+  await api.dispose();
+}
+
+// createNodeViaApi creates an empty page or section under parentId (null for
+// the root) and returns its id.
+export async function createNodeViaApi(
+  ctx: APIRequestContext,
+  input: { title: string; slug: string; kind: 'page' | 'section'; parentId: string | null },
+) {
+  const created = await ctx.post('/api/pages', {
+    headers: await csrfHeader(ctx),
+    data: input,
+  });
+  expect(created.status(), `create ${input.kind} ${input.slug}`).toBe(201);
+  return (await created.json()).id as string;
+}

@@ -49,7 +49,16 @@ func newImportURLCreateUC(t *testing.T, deps *testDeps, fetcher *stubImageFetche
 	createUC := pages.NewCreatePageUseCase(deps.tree, deps.slug, deps.orchestrator(), slog.Default(), nil)
 	updateUC := pages.NewUpdatePageUseCase(deps.tree, deps.slug, deps.orchestrator(), slog.Default(), nil)
 	uploadUC := wikiassets.NewUploadAssetUseCase(deps.tree, deps.assets, deps.revision, slog.Default())
-	return pages.NewImportURLCreateUseCase(createUC, updateUC, uploadUC, fetcher, 1024*1024, slog.Default())
+	upload := func(ctx context.Context, in pages.ImportAssetUploadInput) (*pages.ImportAssetUploadOutput, error) {
+		out, err := uploadUC.Execute(ctx, wikiassets.UploadAssetInput{
+			UserID: in.UserID, PageID: in.PageID, File: in.File, Filename: in.Filename, MaxBytes: in.MaxBytes,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &pages.ImportAssetUploadOutput{URL: out.URL}, nil
+	}
+	return pages.NewImportURLCreateUseCase(createUC, updateUC, upload, fetcher, 1024*1024, slog.Default())
 }
 
 func TestImportURLCreateUseCase_LocalizesImages(t *testing.T) {

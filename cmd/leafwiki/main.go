@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -41,11 +42,11 @@ import (
 	httpmetrics "github.com/perber/wiki/internal/http/metrics"
 	authmw "github.com/perber/wiki/internal/http/middleware/auth"
 	"github.com/perber/wiki/internal/llm"
+	"github.com/perber/wiki/internal/pagedisplay"
 	"github.com/perber/wiki/internal/publicaccess"
 	"github.com/perber/wiki/internal/restore"
 	"github.com/perber/wiki/internal/snapshot"
 	"github.com/perber/wiki/internal/snapshot/sshupload"
-	"github.com/perber/wiki/internal/tocdisplay"
 	"github.com/perber/wiki/internal/wiki"
 	wikibackup "github.com/perber/wiki/internal/wiki/backup"
 	wikiinstancesettings "github.com/perber/wiki/internal/wiki/instancesettings"
@@ -241,14 +242,21 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		fail("Invalid HTTP remote user auto-create configuration", "error", err)
 	}
 
-	if err := validateSMTPConfig(cfg.email.smtpHost, cfg.email.smtpFrom, cfg.email.publicURL, cfg.email.smtpSecurity); err != nil {
+	if err := validateSMTPConfig(cfg.email.smtpHost, cfg.email.smtpFrom, cfg.server.publicURL, cfg.email.smtpSecurity); err != nil {
 		fail("Invalid SMTP configuration", "error", err)
+	}
+	publicURL, publicURLWarning, err := validatePublicURL(cfg.server.publicURL, basePath, smtpEnabled)
+	if err != nil {
+		fail("Invalid SMTP configuration", "error", err)
+	}
+	if publicURLWarning != "" {
+		slog.Default().Warn(publicURLWarning)
 	}
 	if smtpEnabled {
 		// A misconfigured public URL produces broken links in emails that
 		// have already gone out — irreversible — so log the resolved value
 		// once at boot rather than only on first use.
-		slog.Default().Info("SMTP email enabled", "host", cfg.email.smtpHost, "port", cfg.email.smtpPort, "security", cfg.email.smtpSecurity, "publicUrl", cfg.email.publicURL)
+		slog.Default().Info("SMTP email enabled", "host", cfg.email.smtpHost, "port", cfg.email.smtpPort, "security", cfg.email.smtpSecurity, "publicUrl", redactURL(publicURL))
 	}
 
 	if cfg.proxy.enableHTTPRemoteUser {
@@ -315,10 +323,13 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 	}
 
 	publicAccessService := buildPublicAccessService(cmd, cfg)
+	if publicURL == "" && publicAccessService.Enabled() {
+		slog.Default().Info("set --public-url for canonical links")
+	}
 
-	tocDisplayService, err := tocdisplay.New(cfg.server.dataDir)
+	pageDisplayService, err := pagedisplay.New(cfg.server.dataDir)
 	if err != nil {
-		fail("Failed to load toc-display configuration", "error", err)
+		fail("Failed to load page display configuration", "error", err)
 	}
 
 	if !cfg.auth.disableAuth {
@@ -356,6 +367,7 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		AuthDisabled:           cfg.auth.disableAuth,
 		EnableRevision:         cfg.frontend.enableRevision,
 		EnableAPIKeyManagement: cfg.frontend.enableAPIKeyManagement,
+		EnableShareLinks:       cfg.frontend.enableShareLinks,
 		MaxRevisionHistory:     cfg.frontend.maxRevisionHistory,
 		EditorLimit:            cfg.auth.editorLimit,
 		RevisionCoalesceWindow: cfg.frontend.revisionCoalesceWindow,
@@ -369,14 +381,16 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 			Security:           email.Security(cfg.email.smtpSecurity),
 			InsecureSkipVerify: cfg.email.smtpInsecureSkipVerify,
 			Timeout:            cfg.email.smtpTimeout,
-			PublicURL:          cfg.email.publicURL,
+			PublicURL:          publicURL,
 		},
 		LLM: llm.Config{
 			BaseURL: cfg.server.llmBaseURL,
 			APIKey:  cfg.server.llmAPIKey,
 			Model:   cfg.server.llmModel,
 		},
-		Metrics: metrics,
+		Metrics:      metrics,
+		PublicAccess: publicAccessService,
+		PublicURL:    publicURL,
 	})
 	if err != nil {
 		if msg, ok := corruptDatabaseMessage(err); ok {
@@ -385,7 +399,7 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		fail("Failed to initialize Wiki", "error", err)
 	}
 
-	w.SetInstanceSettingsRoutes(wikiinstancesettings.NewRoutes(publicAccessService, tocDisplayService, w.AuthService(), slog.Default()))
+	w.SetInstanceSettingsRoutes(wikiinstancesettings.NewRoutes(publicAccessService, pageDisplayService, w.AuthService(), slog.Default()))
 
 	// Log .leafwikiignore status
 	rootDir := filepath.Join(cfg.server.dataDir, "root")
@@ -425,16 +439,14 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 			BrandingConfigFile: filepath.Join(cfg.server.dataDir, "branding.json"),
 			SettingsFiles: []string{
 				filepath.Join(cfg.server.dataDir, "public-access.json"),
-				filepath.Join(cfg.server.dataDir, "toc-display.json"),
+				filepath.Join(cfg.server.dataDir, pagedisplay.FileName),
 			},
-			SchemaFile:         filepath.Join(cfg.server.dataDir, "schema.json"),
-			UsersDBPath:        filepath.Join(cfg.server.dataDir, "users.db"),
-			APIKeysDBPath:      filepath.Join(cfg.server.dataDir, "api_keys.db"),
-			FavoritesDBPath:    filepath.Join(cfg.server.dataDir, "favorites.db"),
-			UserSettingsDBPath: filepath.Join(cfg.server.dataDir, "usersettings.db"),
-			WikiVersion:        Version,
-			Interval:           cfg.backup.snapshotInterval,
-			RetentionCount:     cfg.backup.snapshotRetention,
+			SchemaFile:     filepath.Join(cfg.server.dataDir, "schema.json"),
+			UsersDBPath:    filepath.Join(cfg.server.dataDir, "users.db"),
+			StateDBPaths:   stateDBPaths(cfg.server.dataDir),
+			WikiVersion:    Version,
+			Interval:       cfg.backup.snapshotInterval,
+			RetentionCount: cfg.backup.snapshotRetention,
 		})
 		snapshotScheduler := snapshot.NewScheduler(snapshotManager)
 		defer snapshotScheduler.Stop()
@@ -472,10 +484,8 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 			WikiVersion:        Version,
 			WriteGate:          writeGate,
 			AuthService:        w.AuthService(),
-			APIKeyService:      w.APIKeyService(),
-			Favorites:          w.Favorites(),
-			UserSettings:       w.UserSettingsService(),
-			Reloadables:        []settings.Reloadable{w.BrandingService(), publicAccessService, tocDisplayService},
+			Stores:             w.StateStores(),
+			Reloadables:        []settings.Reloadable{w.BrandingService(), publicAccessService, pageDisplayService},
 			UserResolver:       w.UserResolver(),
 			TriggerResync:      w.TriggerResyncAsync,
 			MaxUploadSizeBytes: restoreUploadMaxSize,
@@ -489,7 +499,7 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 
 	router := httpinternal.NewRouter(w.Registrars(), w.FrontendConfig(), httpinternal.RouterOptions{
 		PublicAccess:            publicAccessService,
-		AlwaysShowToc:           tocDisplayService,
+		PageDisplay:             pageDisplayService,
 		EditorLimit:             cfg.auth.editorLimit,
 		InjectCodeInHeader:      cfg.frontend.injectCodeInHeader,
 		CustomStylesheet:        cfg.frontend.customStylesheet,
@@ -511,6 +521,8 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 		SMTPEnabled:             smtpEnabled,
 		TOTPAvailable:           w.TOTPService() != nil,
 		LLMConfigured:           w.LLMConfigured(),
+		TrustedProxies:          trustedProxies,
+		UnixSocket:              cfg.server.unixSocket != "",
 		HTTPRemoteUser: httpinternal.HTTPRemoteUserConfig{
 			Enabled:         cfg.proxy.enableHTTPRemoteUser,
 			HeaderName:      cfg.proxy.httpRemoteUserHeader,
@@ -520,13 +532,14 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 			TrustedProxies:  trustedProxies,
 			UserService:     w.UserService,
 		},
-		APIKeyService:     w.APIKeyService(),
-		DisableRequestLog: cfg.server.disableRequestLog,
-		UserManagementURL: cfg.proxy.userManagementURL,
-		DefaultLanguage:   cfg.frontend.defaultLanguage,
-		LoginURL:          cfg.proxy.loginURL,
-		LogoutURL:         logoutURL,
-		WriteGate:         writeGate,
+		APIKeyService:          w.APIKeyService(),
+		DisableRequestLog:      cfg.server.disableRequestLog,
+		DisableSecurityHeaders: cfg.server.disableSecurityHeaders,
+		UserManagementURL:      cfg.proxy.userManagementURL,
+		DefaultLanguage:        cfg.frontend.defaultLanguage,
+		LoginURL:               cfg.proxy.loginURL,
+		LogoutURL:              logoutURL,
+		WriteGate:              writeGate,
 	})
 
 	reloadSignals := make(chan os.Signal, 1)
@@ -543,6 +556,17 @@ func runServerCommand(_ context.Context, cmd *cli.Command, cfg *serverConfig) er
 	}
 
 	return nil
+}
+
+// stateDBPaths returns the paths of every state database other than users.db
+// that a snapshot captures (see restore.StateDBFiles).
+func stateDBPaths(dataDir string) []string {
+	files := restore.StateDBFiles()
+	paths := make([]string, 0, len(files))
+	for _, f := range files {
+		paths = append(paths, filepath.Join(dataDir, f))
+	}
+	return paths
 }
 
 // buildPublicAccessService decides whether "public mode" is pinned by
@@ -574,7 +598,7 @@ func runServer(
 	reloadSignals, shutdownSignals <-chan os.Signal,
 ) error {
 	server := &http.Server{
-		Handler:           router.Handler(),
+		Handler:           httpinternal.Handler(router),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -788,9 +812,8 @@ func validateSMTPConfig(host, from, publicURL, security string) error {
 	if publicURL == "" {
 		return fmt.Errorf("--public-url is required when --smtp-host is set")
 	}
-	u, err := url.Parse(publicURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("--public-url must be an absolute http(s):// URL, got %q", publicURL)
+	if _, err := parsePublicURL(publicURL); err != nil {
+		return err
 	}
 	switch email.Security(security) {
 	case email.SecurityNone, email.SecurityStartTLS, email.SecurityTLS:
@@ -798,6 +821,53 @@ func validateSMTPConfig(host, from, publicURL, security string) error {
 		return fmt.Errorf("--smtp-security must be one of none, starttls, tls, got %q", security)
 	}
 	return nil
+}
+
+// validatePublicURL checks --public-url, which outgoing email links and
+// canonical links share. An invalid value is fatal only with SMTP, where
+// email links depend on it (validateSMTPConfig reports that first); without
+// SMTP it is ignored with a warning, because canonical links just fall away.
+// resolved is the value to use, "" when unset or ignored.
+func validatePublicURL(publicURL, basePath string, smtpEnabled bool) (resolved, warning string, err error) {
+	if publicURL == "" {
+		return "", "", nil
+	}
+	u, err := parsePublicURL(publicURL)
+	if err != nil {
+		if smtpEnabled {
+			return "", "", err
+		}
+		return "", err.Error() + "; ignoring it", nil
+	}
+	if path := strings.TrimRight(u.Path, "/"); path != basePath {
+		warning = fmt.Sprintf("--public-url path %q does not match --base-path %q; canonical links use --base-path, email links use --public-url as given", path, basePath)
+	}
+	return publicURL, warning, nil
+}
+
+func parsePublicURL(publicURL string) (*url.URL, error) {
+	u, err := url.Parse(publicURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("--public-url must be an absolute http(s):// URL, got %q", redactURL(publicURL))
+	}
+	return u, nil
+}
+
+// userinfoPassword finds the password of "scheme://user:password@" in a URL
+// that url.Parse rejects.
+var userinfoPassword = regexp.MustCompile(`^([^:/?#]+://[^:@/?#]*:)[^@/?#]*@`)
+
+// redactURL replaces the password in raw, so --public-url can be logged and
+// put into errors without leaking credentials. Without a password raw is
+// returned as given (Redacted would normalize it).
+func redactURL(raw string) string {
+	if u, err := url.Parse(raw); err == nil {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			return u.Redacted()
+		}
+		return raw
+	}
+	return userinfoPassword.ReplaceAllString(raw, "${1}xxxxx@")
 }
 
 // resolveLogoutURL resolves --logout-url/LEAFWIKI_LOGOUT_URL, falling back to

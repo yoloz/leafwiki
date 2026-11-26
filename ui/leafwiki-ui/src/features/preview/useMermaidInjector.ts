@@ -13,6 +13,40 @@ function loadMermaid(): Promise<MermaidDefault> {
   return mermaidPromise
 }
 
+// Applied by mermaid to the HTML of every label (on top of 'antiscript').
+// Labels are author-controlled and end up in the live page through a
+// foreignObject, so they may format text and link, but not draw form controls
+// or escape their box: inline style and class (which would reach the app's
+// Tailwind utilities) are dropped, and so are dialogs and popovers, which the
+// browser draws above the whole page. Mermaid's own wrapper markup, classDef and
+// style statements are added outside this pass and keep working. Setting this
+// replaces mermaid's default, which forbids only <style>, so keep it here.
+const labelSanitizeConfig = {
+  FORBID_TAGS: [
+    'form',
+    'input',
+    'button',
+    'textarea',
+    'select',
+    'option',
+    'style',
+    'iframe',
+    'dialog',
+  ],
+  FORBID_ATTR: [
+    'style',
+    'class',
+    'popover',
+    'popovertarget',
+    'popovertargetaction',
+    'commandfor',
+    'command',
+    // DOMPurify drops only names that already exist on document; any other
+    // name on an img would still define a new document property.
+    'name',
+  ],
+}
+
 let initializedTheme: 'default' | 'dark' | null = null
 
 async function ensureMermaidInitialized(
@@ -24,6 +58,7 @@ async function ensureMermaidInitialized(
     mermaid.initialize({
       startOnLoad: false,
       securityLevel: 'antiscript',
+      dompurifyConfig: labelSanitizeConfig,
       theme,
       deterministicIds: true,
       deterministicIDSeed: 'leafwiki',
@@ -44,6 +79,10 @@ export type MermaidRenderError = {
 
 export type MermaidInjectorOps = {
   containerRef: React.RefObject<HTMLDivElement | null>
+  // Element mermaid renders into to measure labels, owned by MarkdownPreview.
+  // Passed by reference: an id lookup could find an element of the rendered
+  // page instead, since content may use any id.
+  sandboxRef: React.RefObject<HTMLDivElement | null>
   code: string
   dataLine?: string
   theme: 'default' | 'dark'
@@ -73,6 +112,7 @@ function normalizeCode(code: string) {
 
 export function useMermaidInjector({
   containerRef,
+  sandboxRef,
   code,
   dataLine,
   theme,
@@ -118,7 +158,7 @@ export function useMermaidInjector({
         return // No need to re-render
       }
       // This is required to prevent layout shifts
-      const sandbox = document.getElementById('mermaid-renderer')
+      const sandbox = sandboxRef.current
       if (!sandbox) {
         console.warn('Mermaid renderer element not found')
         return
@@ -140,8 +180,9 @@ export function useMermaidInjector({
         // injected into the DOM (raw XML error visible to the user).
         // Use <template> to keep the fragment inert (no side-effect fetches).
         // XSS: the SVG comes from mermaid.render with securityLevel 'antiscript',
-        // which runs HTML labels through DOMPurify. Keep that level (or stricter)
-        // when changing the mermaid config.
+        // which runs HTML labels through DOMPurify with labelSanitizeConfig.
+        // Keep that level (or stricter) and that config when changing the
+        // mermaid config.
         const template = document.createElement('template')
         // eslint-disable-next-line no-restricted-syntax
         template.innerHTML = svg
@@ -194,5 +235,5 @@ export function useMermaidInjector({
       cancelled = true
       if (raf1) cancelAnimationFrame(raf1)
     }
-  }, [containerRef, code, dataLine, theme, onError])
+  }, [containerRef, sandboxRef, code, dataLine, theme, onError])
 }

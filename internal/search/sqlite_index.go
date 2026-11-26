@@ -2,13 +2,14 @@ package search
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
-	"unicode"
 
 	"github.com/perber/wiki/internal/core/excerpt"
 	"github.com/perber/wiki/internal/core/markdown"
@@ -72,339 +73,6 @@ func extractHeadings(src string) string {
 	})
 
 	return excerpt.PlainTextFromMarkdown(buf.String())
-}
-
-// buildFuzzyQuery turns raw user search input into an FTS5 MATCH argument.
-//
-// It classifies each whitespace-separated field independently rather than
-// making one all-or-nothing trust decision for the whole query string. The
-// earlier whole-query approach (github.com/perber/leafwiki/issues/1577)
-// trusted the *entire* query as deliberate FTS5 syntax the moment it saw an
-// operator character (*, (, ), :, AND, OR) anywhere in it — so a query like
-// `foo* bar,baz` or `it's* thing` still reached SQLite with an unescaped
-// comma or apostrophe in the other field and failed with an FTS5 syntax
-// error. Classifying field-by-field means one field's operator syntax can
-// no longer vouch for a different field's stray punctuation.
-func buildFuzzyQuery(q string) string {
-	q = strings.TrimSpace(q)
-	if q == "" {
-		return q
-	}
-
-	// A NEAR(...) proximity call is the one FTS5 construct whose syntax
-	// genuinely spans multiple whitespace-separated fields tied together
-	// by punctuation (NEAR(term1 term2, distance)) — per-field
-	// classification below would treat "term2," and "distance)" as two
-	// unrelated fields and strip the comma the call's own grammar requires,
-	// silently breaking it instead of erroring. Trusting the whole call
-	// verbatim when it's shaped like one preserves this narrow,
-	// already-supported case exactly as it worked before this function
-	// existed.
-	if isNearFunctionCall(q) {
-		return q
-	}
-
-	fields := splitFTS5AwareFields(q)
-	sanitized := make([]string, len(fields))
-	for i := range fields {
-		sanitized[i] = sanitizeFTS5Field(fields, i)
-	}
-	return strings.Join(sanitized, " ")
-}
-
-// isNearFunctionCall reports whether q, trimmed, is shaped like a complete
-// FTS5 NEAR(...) proximity call ("NEAR" then "(", ending in ")") — not a
-// syntax guarantee, just enough to single out this specific construct from
-// ordinary text before per-field classification would otherwise take it
-// apart.
-func isNearFunctionCall(q string) bool {
-	upper := strings.ToUpper(q)
-	if !strings.HasPrefix(upper, "NEAR") {
-		return false
-	}
-	rest := strings.TrimSpace(upper[len("NEAR"):])
-	return strings.HasPrefix(rest, "(") && strings.HasSuffix(q, ")")
-}
-
-// splitFTS5AwareFields splits q on whitespace like strings.Fields, except
-// whitespace inside a "double-quoted span" doesn't split the field, so a
-// quoted phrase (balanced or not) reaches sanitizeFTS5Field as one field to
-// classify as a whole instead of being cut apart mid-phrase.
-func splitFTS5AwareFields(q string) []string {
-	var fields []string
-	var cur strings.Builder
-	inQuote := false
-	for _, r := range q {
-		switch {
-		case r == '"':
-			cur.WriteRune(r)
-			inQuote = !inQuote
-		case !inQuote && (r == ' ' || r == '\t' || r == '\n' || r == '\r'):
-			if cur.Len() > 0 {
-				fields = append(fields, cur.String())
-				cur.Reset()
-			}
-		default:
-			cur.WriteRune(r)
-		}
-	}
-	if cur.Len() > 0 {
-		fields = append(fields, cur.String())
-	}
-	return fields
-}
-
-// sanitizeFTS5Field decides whether fields[i] is trustworthy, deliberate
-// FTS5 syntax (an operator, a boolean keyword used between two real
-// operands, a column filter naming a real column, an already-quoted
-// phrase) or literal search text that needs quoting so it can't be misread
-// as syntax.
-//
-// A comma or apostrophe — never valid FTS5 syntax on their own — and an
-// unbalanced double quote always disqualify a field from the "trust it"
-// path, even if the same field also contains an operator character like *
-// or : (that combination is exactly what #1577's follow-up reports found:
-// "sometimes # and \"" alongside other punctuation).
-func sanitizeFTS5Field(fields []string, i int) string {
-	f := fields[i]
-	if f == "" {
-		return f
-	}
-
-	if isBalancedQuotedField(f) {
-		return f
-	}
-
-	// A column filter is always rewritten (never trusted verbatim) into a
-	// safe, per-word-quoted form scoped to that column — see
-	// rewriteColumnFilterField for why: the raw value can contain anything
-	// (a pasted URL's second ":", an apostrophe, ...) without needing its
-	// own escaping rules, because it's built from the same safe
-	// splitIntoIndexWords primitive as the plain-literal-text path below.
-	if rewritten, ok := rewriteColumnFilterField(f); ok {
-		return rewritten
-	}
-
-	// An operator field ("foo*", "(foo", "bar)") is only trusted when it is
-	// well-formed FTS5 syntax on its own and the query's parentheses balance
-	// overall. Anything else ("foo-bar*", "report.v2*", "(foo" without a
-	// partner, a bare "*") goes through the literal path below.
-	if strings.ContainsAny(f, "*()") {
-		if isWellFormedOperatorField(f) && (!strings.ContainsAny(f, "()") || operatorParensBalanced(fields)) {
-			return f
-		}
-	} else if isFTS5Keyword(f) && hasRealOperandNeighbors(fields, i) {
-		return f
-	}
-
-	// Literal text: split it into the same "words" the pages table's
-	// tokenizer would (see splitIntoIndexWords) and AND together a
-	// quoted-prefix match for each one, rather than quoting the whole field
-	// as a single phrase. A single quoted phrase would need FTS5 to treat
-	// the words on either side of the dropped punctuation as consecutive
-	// token positions, which does not hold for every separator character —
-	// SQLite's unicode61 tokenizer does not leave "it" and "s" (from "it's")
-	// at adjacent positions the way it does for, say, a comma, so a
-	// `"it's"` phrase query fails to match content containing "it's" even
-	// though both tokenize the same way. AND-ing independent terms doesn't
-	// depend on that adjacency at all.
-	return quoteWordsAsPrefixTerms(splitIntoIndexWords(f))
-}
-
-// isBarewordRune reports whether r may appear in an unquoted FTS5 bareword.
-// The tokenizer's searchTokenChars (- . / # +) are deliberately not
-// included: they are word characters for indexing but not valid query
-// syntax.
-func isBarewordRune(r rune) bool {
-	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
-}
-
-// isWellFormedOperatorField reports whether f consists only of barewords,
-// prefix markers and parentheses in a shape FTS5 accepts: "(" only at the
-// start or after another "(", "*" only directly after a word, ")" only after
-// a word, "*" or ")", and nothing following ")" except another ")".
-func isWellFormedOperatorField(f string) bool {
-	var prev rune // 0 = start of field
-	for _, r := range f {
-		switch {
-		case r == '*':
-			if !isBarewordRune(prev) {
-				return false
-			}
-		case r == '(':
-			if prev != 0 && prev != '(' {
-				return false
-			}
-		case r == ')':
-			if !isBarewordRune(prev) && prev != '*' && prev != ')' {
-				return false
-			}
-		case isBarewordRune(r):
-			if prev == '*' || prev == ')' {
-				return false
-			}
-		default:
-			return false
-		}
-		prev = r
-	}
-	return true
-}
-
-// operatorParensBalanced reports whether the parentheses in the query's
-// well-formed operator fields pair up, so a group may span several fields
-// ("(apple OR cherry) AND banana") but a lone "(foo" is not trusted.
-func operatorParensBalanced(fields []string) bool {
-	depth := 0
-	for _, f := range fields {
-		if !isWellFormedOperatorField(f) {
-			continue
-		}
-		for _, r := range f {
-			switch r {
-			case '(':
-				depth++
-			case ')':
-				depth--
-				if depth < 0 {
-					return false
-				}
-			}
-		}
-	}
-	return depth == 0
-}
-
-// quoteWordsAsPrefixTerms wraps each word as its own quoted-phrase-prefix
-// match ("word"*) and joins them with a space (FTS5's implicit AND). Since
-// each word came from splitIntoIndexWords, none of them can contain a
-// quote, comma, or apostrophe, so no escaping is needed here.
-func quoteWordsAsPrefixTerms(words []string) string {
-	for i, w := range words {
-		words[i] = `"` + w + `"*`
-	}
-	return strings.Join(words, " ")
-}
-
-// hasRealOperandNeighbors reports whether fields[i] sits strictly between
-// two other fields that aren't themselves boolean keywords. FTS5's
-// AND/OR/NOT are binary operators: a dangling "AND"/"OR"/"NOT" with no
-// operand on one side (or with another keyword standing in for the
-// operand, e.g. a doubled "foo AND AND bar") is itself a syntax error, not
-// valid-but-unusual syntax.
-func hasRealOperandNeighbors(fields []string, i int) bool {
-	if i <= 0 || i >= len(fields)-1 {
-		return false
-	}
-	return !isFTS5Keyword(fields[i-1]) && !isFTS5Keyword(fields[i+1])
-}
-
-// searchTokenChars is the extra tokenchars given to the pages table's
-// unicode61 tokenizer (see ensureSchema) — the punctuation that's part of a
-// word rather than a separator (so "report-final.v2" indexes as one token,
-// not three). splitIntoIndexWords uses the same alphabet so a literal
-// search field is split into exactly the "words" the tokenizer would
-// itself produce; both must stay in sync with the schema's tokenize
-// argument or search can silently miss content that's plainly there.
-const searchTokenChars = "-_/+#."
-
-// splitIntoIndexWords splits a raw field into the same run-of-word-chars
-// units the pages table's tokenizer (see searchTokenChars) would treat as
-// tokens, dropping any other character (comma, apostrophe, a stray ") as a
-// separator instead of embedding it as literal phrase content — since
-// split words can never contain a quote, comma, or apostrophe, none of
-// them need escaping.
-func splitIntoIndexWords(f string) []string {
-	var words []string
-	var cur strings.Builder
-	for _, r := range f {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune(searchTokenChars, r) {
-			cur.WriteRune(r)
-			continue
-		}
-		if cur.Len() > 0 {
-			words = append(words, cur.String())
-			cur.Reset()
-		}
-	}
-	if cur.Len() > 0 {
-		words = append(words, cur.String())
-	}
-	return words
-}
-
-// isFTS5Keyword reports whether f is a boolean-operator keyword. Callers
-// must also confirm it sits between two real operands (see
-// hasRealOperandNeighbors) before trusting it — FTS5's AND/OR/NOT are binary
-// operators, so a dangling "AND"/"OR"/"NOT" with no left or right neighbor
-// is itself a syntax error, not valid-but-unusual syntax.
-func isFTS5Keyword(f string) bool {
-	switch strings.ToUpper(f) {
-	case "AND", "OR", "NOT":
-		return true
-	default:
-		return false
-	}
-}
-
-// searchColumns are the pages FTS5 table's real column names, lowercased,
-// against which a field's "col:" prefix is validated before trusting it as
-// an FTS5 column filter (see rewriteColumnFilterField). FTS5 column-name
-// matching is case-insensitive, so column names are compared lowercased.
-var searchColumns = map[string]bool{
-	"path":     true,
-	"filepath": true,
-	"pageid":   true,
-	"kind":     true,
-	"title":    true,
-	"headings": true,
-	"content":  true,
-}
-
-// rewriteColumnFilterField checks whether f looks like a deliberate FTS5
-// column filter (e.g. "content:search") naming one of the pages table's
-// real columns, as opposed to incidental punctuation with a colon in it —
-// a pasted URL ("http://example.com"), a Windows path ("c:\Users\foo"), or
-// a time ("10:30") all contain ":" but aren't column filters, and trusting
-// any colon-bearing field unconditionally (the pre-#1577 behavior) sends
-// SQLite a "no such column" error for all three.
-//
-// When the prefix does name a real column, the *value* after the colon is
-// never trusted verbatim either — it's rewritten into a parenthesized,
-// per-word quoted-prefix group scoped to that column
-// (`col:("word1"* "word2"*)`), built with the same splitIntoIndexWords
-// primitive as the plain-literal-text path. That handles a value
-// containing anything (another ":" from a pasted URL, an apostrophe, ...)
-// safely without a separate "is this value simple enough to trust"
-// predicate, and — unlike simply falling back to an unscoped literal
-// search — still honors the column scope the user asked for instead of
-// silently searching every column.
-func rewriteColumnFilterField(f string) (string, bool) {
-	idx := strings.Index(f, ":")
-	if idx <= 0 {
-		return "", false
-	}
-	col := f[:idx]
-	if !searchColumns[strings.ToLower(col)] {
-		return "", false
-	}
-	words := splitIntoIndexWords(f[idx+1:])
-	if len(words) == 0 {
-		return "", false
-	}
-	return col + ":(" + quoteWordsAsPrefixTerms(words) + ")", true
-}
-
-// isBalancedQuotedField reports whether f is a complete, balanced quoted
-// FTS5 phrase — e.g. `"foo bar"` or `"foo bar"*` — as opposed to a
-// lone/unbalanced " that only looks like the start of one.
-func isBalancedQuotedField(f string) bool {
-	body := strings.TrimSuffix(f, "*")
-	if len(body) < 2 || !strings.HasPrefix(body, `"`) || !strings.HasSuffix(body, `"`) {
-		return false
-	}
-	inner := body[1 : len(body)-1]
-	return strings.Count(inner, `"`)%2 == 0
 }
 
 func NewSQLiteIndex(storageDir string) (*SQLiteIndex, error) {
@@ -485,29 +153,265 @@ func (s *SQLiteIndex) withDBRead(fn func(db *sql.DB) error) error {
 	return fn(db)
 }
 
+// searchSchemaVersion is stored in search.db's PRAGMA user_version. Bump it
+// whenever the columns of a search table change, or the text written into
+// them does, so an existing search.db is rebuilt instead of read in a shape
+// or normalisation this binary doesn't expect (ADR-0022).
+const searchSchemaVersion = 2
+
+// searchSchema creates every table of search.db. ensureSchema compares the
+// schema SQLite stores for it against the one in the file, so it is the
+// single description of what a current search.db looks like.
+var searchSchema = `
+	CREATE VIRTUAL TABLE pages USING fts5(
+		path UNINDEXED,
+		filepath UNINDEXED,
+		pageID,
+		kind UNINDEXED,
+		title,
+		headings,
+		content,
+		tokenize = "unicode61 tokenchars '` + searchTokenChars + `'"
+	);
+`
+
+// ensureSchema keeps search.db as it is when its user_version and its schema
+// match this binary, and otherwise drops every table and recreates them
+// empty. The schema check matters on its own: binaries before ADR-0022 drop
+// and recreate pages in their own shape without touching user_version.
+//
+// The check and the rebuild run in one BEGIN IMMEDIATE transaction on one
+// connection. Taking the write lock up front honours busy_timeout, whereas a
+// deferred transaction that upgrades from read to write in WAL mode fails
+// with SQLITE_BUSY at once when another opener wrote first. Checking inside
+// the lock lets a waiting opener see the schema the first one just rebuilt
+// and keep it.
+//
+// Boot still clears and refills the index (IndexAllPagesContext) right after
+// this, so keeping the rows only saves the DROP for now; the fingerprint sync
+// planned in ADR-0022 is what will make boot trust them.
 func (s *SQLiteIndex) ensureSchema() error {
+	want, err := expectedSearchSchema()
+	if err != nil {
+		return fmt.Errorf("build expected search schema: %w", err)
+	}
 	return s.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`
-			DROP TABLE IF EXISTS pages;
-			CREATE VIRTUAL TABLE IF NOT EXISTS pages USING fts5(
-				path UNINDEXED,
-				filepath UNINDEXED,
-				pageID,
-				kind UNINDEXED,
-				title,
-				headings,
-				content,
-				tokenize = "unicode61 tokenchars '` + searchTokenChars + `'"
-			);
-        `)
-		return err
+		return inImmediateTx(db, func(ctx context.Context, conn *sql.Conn) error {
+			var version int
+			if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil {
+				return err
+			}
+			got, err := readSchema(conn)
+			if err != nil {
+				return err
+			}
+			if version == searchSchemaVersion && got == want {
+				// Kept tables must still open. Without this a corrupt FTS5
+				// table behind an intact sqlite_master passes the check, and
+				// every later query fails without RebuildOnCorruption seeing it.
+				return openVirtualTables(ctx, conn)
+			}
+			dropped, err := recreateSearchSchema(ctx, conn)
+			if err != nil {
+				return err
+			}
+			if dropped > 0 {
+				slog.Default().Info("search index schema changed, rebuilding it empty",
+					"storedVersion", version, "schemaVersion", searchSchemaVersion)
+			}
+			return nil
+		})
 	})
 }
 
+// inImmediateTx runs fn in a BEGIN IMMEDIATE transaction on one connection
+// and commits it, or rolls it back if fn or the commit fails.
+func inImmediateTx(db *sql.DB, fn func(ctx context.Context, conn *sql.Conn) error) error {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		}
+	}()
+	if err := fn(ctx, conn); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// ownSchemaObjects selects the objects that make up our schema: our tables,
+// views, indexes and triggers and the FTS5 shadow tables (pages_*). SQLite's
+// internal sqlite_* objects (sqlite_stat1 after ANALYZE or PRAGMA optimize,
+// sqlite_sequence, sqlite_autoindex_*) are left out: SQLite manages them, and
+// the ones that follow from our DDL are covered by comparing that DDL.
+const ownSchemaObjects = `name NOT LIKE 'sqlite\_%' ESCAPE '\'`
+
+// expectedSearchSchema creates searchSchema in an empty in-memory database
+// and returns what SQLite stores for it. Comparing SQLite's own text instead
+// of our DDL string sidesteps how SQLite normalises CREATE statements and
+// includes the FTS5 shadow tables.
+func expectedSearchSchema() (string, error) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = db.Close() }()
+	// Every pooled connection would get its own empty :memory: database.
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec(searchSchema); err != nil {
+		return "", err
+	}
+	return readSchema(db)
+}
+
+// schemaConn is what readSchema and recreateSearchSchema need from a
+// *sql.DB or a *sql.Conn.
+type schemaConn interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// readSchema returns our schema objects (see ownSchemaObjects) in a stable
+// order.
+func readSchema(db schemaConn) (string, error) {
+	rows, err := db.QueryContext(context.Background(), `SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_master WHERE `+ownSchemaObjects+` ORDER BY type, name`)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+	var b strings.Builder
+	for rows.Next() {
+		var typ, name, table, ddl string
+		if err := rows.Scan(&typ, &name, &table, &ddl); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "%s|%s|%s|%s\n", typ, name, table, ddl)
+	}
+	return b.String(), rows.Err()
+}
+
+// openVirtualTables reads one row of every virtual table in our schema, which
+// runs its module's constructor: FTS5 reads its %_config table and fails with
+// SQLITE_CORRUPT if that is unreadable. It is deliberately not an FTS5
+// integrity-check, whose cost grows with the index; corruption deeper in the
+// index surfaces when a query or write first reaches it.
+func openVirtualTables(ctx context.Context, conn schemaConn) error {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type = 'table' AND `+ownSchemaObjects+` AND sql LIKE 'CREATE VIRTUAL TABLE%'
+		ORDER BY name`)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, name := range names {
+		var rowid int64
+		err := conn.QueryRowContext(ctx, fmt.Sprintf(`SELECT rowid FROM %s LIMIT 1`, quoteIdentifier(name))).Scan(&rowid)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	return nil
+}
+
+// quoteIdentifier quotes a table or view name for SQL.
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+// recreateSearchSchema drops every table and view of our schema (see
+// ownSchemaObjects), creates searchSchema and stamps searchSchemaVersion, and
+// returns how many objects it dropped. It runs inside the caller's
+// transaction. Virtual tables are dropped first, because dropping one also
+// drops its shadow tables.
+//
+// A virtual table whose module this binary lacks cannot be dropped. That is
+// reported as sqliteutil.ErrUnusableDatabase, so NewSQLiteIndex's
+// RebuildOnCorruption replaces the file: search.db is derived.
+func recreateSearchSchema(ctx context.Context, conn schemaConn) (int, error) {
+	rows, err := conn.QueryContext(ctx, `
+		SELECT type, name FROM sqlite_master
+		WHERE type IN ('table', 'view') AND `+ownSchemaObjects+`
+		ORDER BY sql NOT LIKE 'CREATE VIRTUAL TABLE%', name`)
+	if err != nil {
+		return 0, err
+	}
+	var drops []string
+	for rows.Next() {
+		var typ, name string
+		if err := rows.Scan(&typ, &name); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		drops = append(drops, fmt.Sprintf(`DROP %s IF EXISTS %s`, strings.ToUpper(typ), quoteIdentifier(name)))
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, stmt := range drops {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			// SQLite reports this as a plain SQLITE_ERROR; the text is the
+			// only way to tell it apart.
+			if strings.Contains(err.Error(), "no such module") {
+				return 0, fmt.Errorf("%w: %s: %w", sqliteutil.ErrUnusableDatabase, stmt, err)
+			}
+			return 0, err
+		}
+	}
+	if _, err := conn.ExecContext(ctx, searchSchema); err != nil {
+		return 0, err
+	}
+	_, err = conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, searchSchemaVersion))
+	return len(drops), err
+}
+
+// Clear empties the index by dropping and recreating every search table
+// rather than deleting rows, which keeps damaged FTS5 shadow tables around.
+// It is the healing point: boot and resync run Clear plus a full reindex, so
+// damage that ensureSchema's cheap open check cannot see (ADR-0022) heals
+// there. Anything that replaces that full reindex (the fingerprint sync
+// planned in ADR-0022) has to fall back to Clear plus a full reindex on a
+// corruption error. Searches wait on s.mu while Clear runs.
 func (s *SQLiteIndex) Clear() error {
 	return s.withDB(func(db *sql.DB) error {
-		_, err := db.Exec(`DELETE FROM pages`)
-		return err
+		return inImmediateTx(db, func(ctx context.Context, conn *sql.Conn) error {
+			_, err := recreateSearchSchema(ctx, conn)
+			return err
+		})
 	})
 }
 
@@ -580,12 +484,12 @@ func (s *SQLiteIndex) IndexPages(inputs []IndexPageInput) ([]IndexFailure, error
 			failures = append(failures, IndexFailure{PageID: in.PageID, Err: err})
 			continue
 		}
-		content = excerpt.NormalizeMarkdownBody(content)
+		content = excerpt.NormalizeMarkdownBody(stripHighlightMarkers(content))
 		prepped = append(prepped, prepared{
 			path:          in.Path,
 			filePath:      in.FilePath,
 			pageID:        in.PageID,
-			title:         in.Title,
+			title:         stripHighlightMarkers(in.Title),
 			kind:          in.Kind,
 			headings:      extractHeadings(content),
 			sanitizedBody: excerpt.PlainTextForSearch(content),
@@ -709,7 +613,10 @@ func (s *SQLiteIndex) RemovePageByFilePath(filePath string) (int64, error) {
 	return rows, err
 }
 
-func (s *SQLiteIndex) Search(query string, pageIDs []string, offset, limit int) (*SearchResult, error) {
+// Search returns one page of the hits for query, restricted to pageIDs when
+// that is non-nil. Every statement runs under ctx: once ctx ends, the running
+// statement is interrupted and Search returns ctx's error and no result.
+func (s *SQLiteIndex) Search(ctx context.Context, query string, pageIDs []string, offset, limit int) (*SearchResult, error) {
 	query = strings.TrimSpace(query)
 	// ftsQuery, not the raw query, decides whether there's anything to MATCH
 	// on: a query built entirely from characters outside the tokenizer's
@@ -717,7 +624,8 @@ func (s *SQLiteIndex) Search(query string, pageIDs []string, offset, limit int) 
 	// raw query wasn't empty, and `pages MATCH ''` is itself an FTS5 syntax
 	// error — the same crash class #1577 reported, for the simplest
 	// possible input.
-	ftsQuery := buildFuzzyQuery(query)
+	parsed := parseSearchQuery(query)
+	ftsQuery := parsed.fts
 
 	if len(pageIDs) == 0 && pageIDs != nil {
 		return &SearchResult{
@@ -746,11 +654,12 @@ func (s *SQLiteIndex) Search(query string, pageIDs []string, offset, limit int) 
 		whereClause, whereArgs := buildSearchWhereClause(ftsQuery, pageIDs)
 
 		countQuery := fmt.Sprintf(`SELECT COUNT(*) FROM pages WHERE %s;`, whereClause)
-		if err := db.QueryRow(countQuery, whereArgs...).Scan(&total); err != nil {
+		if err := db.QueryRowContext(ctx, countQuery, whereArgs...).Scan(&total); err != nil {
 			return err
 		}
 		sr.Count = total
 
+		orderBy, orderArgs := searchOrderBy(parsed)
 		searchQuery := fmt.Sprintf(`
 		SELECT 
 			pageID,
@@ -769,11 +678,17 @@ func (s *SQLiteIndex) Search(query string, pageIDs []string, offset, limit int) 
 			searchExcerptExpr(ftsQuery != ""),
 			searchRankExpr(ftsQuery != ""),
 			whereClause,
-			searchOrderByExpr(ftsQuery != ""),
+			orderBy,
 		)
 
-		queryArgs := append(append([]interface{}{}, whereArgs...), limit, offset)
-		rows, err := db.Query(searchQuery, queryArgs...)
+		// ctx bounds this statement only because its heavy work (MATCH, bm25,
+		// highlight, snippet and the sort) runs in the first sqlite3_step,
+		// which the driver interrupts when ctx ends; later rows.Next steps
+		// only read the sorted rows and are not interrupted. An ORDER BY that
+		// an index satisfies under the LIMIT, or SQLITE_ENABLE_SORTER_REFERENCES,
+		// would move that work into those uninterruptible steps.
+		queryArgs := append(append(append([]interface{}{}, whereArgs...), orderArgs...), limit, offset)
+		rows, err := db.QueryContext(ctx, searchQuery, queryArgs...)
 		if err != nil {
 			return err
 		}
@@ -783,7 +698,8 @@ func (s *SQLiteIndex) Search(query string, pageIDs []string, offset, limit int) 
 			}
 		}()
 
-		var results []SearchResultItem
+		// Non-nil so a query without a match serializes as [] and not null.
+		results := []SearchResultItem{}
 		for rows.Next() {
 			var r SearchResultItem
 			var bm25Score float64
@@ -817,11 +733,15 @@ func (s *SQLiteIndex) Search(query string, pageIDs []string, offset, limit int) 
 		sr.Limit = limit
 		return nil
 	})
-
-	return sr, err
+	if err != nil {
+		return nil, err
+	}
+	return sr, nil
 }
 
-func (s *SQLiteIndex) SearchPageIDs(query string, pageIDs []string) ([]string, error) {
+// SearchPageIDs returns the IDs of all pages matching query, best first,
+// restricted to pageIDs when that is non-nil. It honours ctx like Search.
+func (s *SQLiteIndex) SearchPageIDs(ctx context.Context, query string, pageIDs []string) ([]string, error) {
 	query = strings.TrimSpace(query)
 	ftsQuery := buildFuzzyQuery(query)
 
@@ -844,7 +764,7 @@ func (s *SQLiteIndex) SearchPageIDs(query string, pageIDs []string) ([]string, e
 		ORDER BY %s;
 	`, searchRankExpr(ftsQuery != ""), whereClause, searchOrderByExpr(ftsQuery != ""))
 
-		rows, err := db.Query(searchQuery, whereArgs...)
+		rows, err := db.QueryContext(ctx, searchQuery, whereArgs...)
 		if err != nil {
 			return err
 		}
@@ -865,70 +785,33 @@ func (s *SQLiteIndex) SearchPageIDs(query string, pageIDs []string) ([]string, e
 
 		return rows.Err()
 	})
-
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func buildSearchWhereClause(ftsQuery string, pageIDs []string) (string, []interface{}) {
-	clauses := make([]string, 0, 2)
-	args := make([]interface{}, 0, 1+len(pageIDs))
+// hitStart and hitEnd are the single-byte markers highlight() puts around a
+// hit in the title (searchTitleExpr); sanitizeSearchTitle turns them into
+// <b>/</b>.
+const (
+	hitStart = "\u0002"
+	hitEnd   = "\u0003"
+)
 
-	if ftsQuery != "" {
-		clauses = append(clauses, "pages MATCH ?")
-		args = append(args, ftsQuery)
-	}
+// highlightMarkerReplacer replaces the hit markers in page text with a
+// space, so page text can never fake a highlight. A space rather than
+// nothing keeps the words on either side apart.
+var highlightMarkerReplacer = strings.NewReplacer(hitStart, " ", hitEnd, " ")
 
-	if len(pageIDs) > 0 {
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(pageIDs)), ",")
-		clauses = append(clauses, fmt.Sprintf("pageID IN (%s)", placeholders))
-		for _, pageID := range pageIDs {
-			args = append(args, pageID)
-		}
-	}
-
-	return strings.Join(clauses, " AND "), args
-}
-
-func searchTitleExpr(hasQuery bool) string {
-	if hasQuery {
-		return "highlight(pages, 4, char(2), char(3))"
-	}
-	return "title"
+func stripHighlightMarkers(text string) string {
+	return highlightMarkerReplacer.Replace(text)
 }
 
 func sanitizeSearchTitle(title string) string {
 	return htmlutil.EscapeTextWithAllowedMarkers(
 		title,
-		htmlutil.AllowedMarker{Marker: "\u0002", HTML: "<b>"},
-		htmlutil.AllowedMarker{Marker: "\u0003", HTML: "</b>"},
+		htmlutil.AllowedMarker{Marker: hitStart, HTML: "<b>"},
+		htmlutil.AllowedMarker{Marker: hitEnd, HTML: "</b>"},
 	)
-}
-
-func searchExcerptExpr(hasQuery bool) string {
-	if hasQuery {
-		return "snippet(pages, 6, '<b>', '</b>', '...', 16)"
-	}
-	return "''"
-}
-
-func searchRankExpr(hasQuery bool) string {
-	if hasQuery {
-		return `bm25(pages,
-				0.0,  -- path
-				0.0,  -- filepath
-				0.0,  -- pageID
-				0.0,  -- kind
-				20.0, -- title
-				5.0,   -- headings
-				1.0    -- content
-			)`
-	}
-	return "0.0"
-}
-
-func searchOrderByExpr(hasQuery bool) string {
-	if hasQuery {
-		return "bm25_score ASC"
-	}
-	return "title COLLATE NOCASE ASC, path COLLATE NOCASE ASC"
 }

@@ -14,9 +14,11 @@ import (
 var legacyBoolFlagNames = []string{
 	"git-backup",
 	"hide-link-metadata-section",
+	"no-tls", // local custom flag, predates the naming convention
 	"public-access",
 	"smtp-insecure-skip-verify",
 	"snapshot",
+	"snapshot-ssh-insecure", // local custom flag, predates the naming convention
 }
 
 var boolFlagPrefixes = []string{"enable-", "disable-", "allow-"}

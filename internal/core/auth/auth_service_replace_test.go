@@ -4,6 +4,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/perber/wiki/internal/test_utils"
 )
 
 func TestAuthService_ReplaceUserStore_SwapsToNewUsers(t *testing.T) {
@@ -12,6 +14,7 @@ func TestAuthService_ReplaceUserStore_SwapsToNewUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(oldStore.Close, t) })
 	if _, err := NewUserService(oldStore).CreateUser("old-user", "old@example.com", "old-password", "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -19,12 +22,13 @@ func TestAuthService_ReplaceUserStore_SwapsToNewUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(sessionStore.Close, t) })
 	oldUserService := NewUserService(oldStore)
 	sessions := NewSessionManager(sessionStore, "test-secret-key-for-unit-tests-1", time.Hour, 24*time.Hour)
 	authService := NewAuthService(oldUserService, sessions, nil)
 	t.Cleanup(func() { _ = authService.Close() })
 
-	if _, err := authService.Login("old-user", "old-password"); err != nil {
+	if _, err := authService.Login("old-user", "old-password", testClient); err != nil {
 		t.Fatalf("expected login against the original store to succeed: %v", err)
 	}
 
@@ -33,6 +37,7 @@ func TestAuthService_ReplaceUserStore_SwapsToNewUsers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(newStore.Close, t) })
 	if _, err := NewUserService(newStore).CreateUser("new-user", "new@example.com", "new-password", "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -44,10 +49,10 @@ func TestAuthService_ReplaceUserStore_SwapsToNewUsers(t *testing.T) {
 		t.Fatalf("ReplaceUserStore failed: %v", err)
 	}
 
-	if _, err := authService.Login("old-user", "old-password"); err == nil {
+	if _, err := authService.Login("old-user", "old-password", testClient); err == nil {
 		t.Error("expected the old user to no longer be reachable after ReplaceUserStore")
 	}
-	if _, err := authService.Login("new-user", "new-password"); err != nil {
+	if _, err := authService.Login("new-user", "new-password", testClient); err != nil {
 		t.Errorf("expected the new user to be reachable after ReplaceUserStore: %v", err)
 	}
 }
@@ -67,7 +72,7 @@ func TestAuthService_PauseUserStoreForSwap_ThenReplaceUserStore_Recovers(t *test
 		t.Fatalf("PauseUserStoreForSwap failed: %v", err)
 	}
 
-	if _, err := f.Login("testuser", "securepass"); err == nil {
+	if _, err := f.Login("testuser", "securepass", testClient); err == nil {
 		t.Fatal("expected Login to fail cleanly while the user store is paused")
 	}
 
@@ -76,6 +81,7 @@ func TestAuthService_PauseUserStoreForSwap_ThenReplaceUserStore_Recovers(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(newStore.Close, t) })
 	if _, err := NewUserService(newStore).CreateUser("restored-user", "restored@example.com", "restored-password", "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +93,7 @@ func TestAuthService_PauseUserStoreForSwap_ThenReplaceUserStore_Recovers(t *test
 		t.Fatalf("ReplaceUserStore after pause failed: %v", err)
 	}
 
-	if _, err := f.Login("restored-user", "restored-password"); err != nil {
+	if _, err := f.Login("restored-user", "restored-password", testClient); err != nil {
 		t.Fatalf("expected login to succeed against the store swapped in after pause: %v", err)
 	}
 }
@@ -101,6 +107,7 @@ func TestAuthService_ReplaceUserStore_ClosesPreviousStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(newStore.Close, t) })
 	if _, err := NewUserService(newStore).CreateUser("new-user", "new@example.com", "new-password", "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +132,7 @@ func TestAuthService_ReplaceUserStore_ConcurrentLoginsDuringSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(oldStore.Close, t) })
 	if _, err := NewUserService(oldStore).CreateUser("shared-user", "shared@example.com", "shared-password", "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +140,7 @@ func TestAuthService_ReplaceUserStore_ConcurrentLoginsDuringSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(sessionStore.Close, t) })
 	sharedUserService := NewUserService(oldStore)
 	sharedSessions := NewSessionManager(sessionStore, "test-secret-key-for-unit-tests-1", time.Hour, 24*time.Hour)
 	authService := NewAuthService(sharedUserService, sharedSessions, nil)
@@ -142,6 +151,7 @@ func TestAuthService_ReplaceUserStore_ConcurrentLoginsDuringSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(newStore.Close, t) })
 	if _, err := NewUserService(newStore).CreateUser("shared-user", "shared@example.com", "shared-password", "admin"); err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +176,7 @@ func TestAuthService_ReplaceUserStore_ConcurrentLoginsDuringSwap(t *testing.T) {
 					return
 				default:
 				}
-				_, _ = authService.Login("shared-user", "shared-password")
+				_, _ = authService.Login("shared-user", "shared-password", testClient)
 			}
 		}()
 	}
@@ -185,7 +195,7 @@ func TestAuthService_ReplaceUserStore_ConcurrentLoginsDuringSwap(t *testing.T) {
 	wg.Wait()
 
 	// The swap must have taken effect by now regardless of request timing.
-	if _, err := authService.Login("shared-user", "shared-password"); err != nil {
+	if _, err := authService.Login("shared-user", "shared-password", testClient); err != nil {
 		t.Errorf("expected login to succeed against the swapped-in store after the race: %v", err)
 	}
 }

@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"mime/multipart"
 	"net/url"
 	"strings"
 	"sync"
 
 	"github.com/perber/wiki/internal/core/tree"
 	"github.com/perber/wiki/internal/urlimport"
-	wikiassets "github.com/perber/wiki/internal/wiki/assets"
 )
 
 // importImageConcurrency bounds parallel image downloads so a page with many
@@ -22,10 +22,24 @@ type imageFetcher interface {
 	FetchImage(ctx context.Context, rawURL string, referer string) (*urlimport.FetchedImage, error)
 }
 
-// assetUploader stores an image payload as a page attachment.
-type assetUploader interface {
-	Execute(ctx context.Context, in wikiassets.UploadAssetInput) (*wikiassets.UploadAssetOutput, error)
+// ImportAssetUploadInput is the pages-slice view of an asset upload. It is
+// declared here so this slice does not import the assets slice; the composition
+// root adapts the concrete uploader.
+type ImportAssetUploadInput struct {
+	UserID   string
+	PageID   string
+	File     multipart.File
+	Filename string
+	MaxBytes int64
 }
+
+// ImportAssetUploadOutput is the result of a localized image upload.
+type ImportAssetUploadOutput struct {
+	URL string
+}
+
+// assetUploader stores an image payload as a page attachment.
+type assetUploader func(ctx context.Context, in ImportAssetUploadInput) (*ImportAssetUploadOutput, error)
 
 // ImportURLCreateInput is the input for ImportURLCreateUseCase.
 type ImportURLCreateInput struct {
@@ -132,7 +146,7 @@ func (uc *ImportURLCreateUseCase) localizeImages(ctx context.Context, userID, pa
 				uc.log.Warn("import: failed to download image", "url", abs, "pageID", pageID, "error", err)
 				return
 			}
-			out, err := uc.uploadAsset.Execute(ctx, wikiassets.UploadAssetInput{
+			out, err := uc.uploadAsset(ctx, ImportAssetUploadInput{
 				UserID: userID, PageID: pageID,
 				File: byteFile{bytes.NewReader(img.Data)}, Filename: img.Filename,
 				MaxBytes: uc.assetMaxBytes,

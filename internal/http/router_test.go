@@ -18,13 +18,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/perber/wiki/internal/core/assets"
+	coreauth "github.com/perber/wiki/internal/core/auth"
 	"github.com/perber/wiki/internal/core/revision"
 	"github.com/perber/wiki/internal/core/tree"
 	httpinternal "github.com/perber/wiki/internal/http"
 	httpmetrics "github.com/perber/wiki/internal/http/metrics"
+	"github.com/perber/wiki/internal/pagedisplay"
 	"github.com/perber/wiki/internal/publicaccess"
 	"github.com/perber/wiki/internal/test_utils"
-	"github.com/perber/wiki/internal/tocdisplay"
 	"github.com/perber/wiki/internal/wiki"
 	wikiinstancesettings "github.com/perber/wiki/internal/wiki/instancesettings"
 )
@@ -678,6 +679,64 @@ func TestDisableRequestLog_DoesNotCrash(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Invite and password-reset emails carry their secret in ?token=, and those
+// links land on the SPA shell, so the request log must never contain it.
+func TestRequestLogger_RedactsTokenQuery(t *testing.T) {
+	const secret = "tokid123.0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name       string
+		target     string
+		wantLogged string
+	}{
+		{name: "invite link", target: "/accept-invite?token=" + secret, wantLogged: "/accept-invite?token=REDACTED"},
+		{name: "reset link", target: "/reset-password?token=" + secret, wantLogged: "/reset-password?token=REDACTED"},
+		{name: "token next to other parameters", target: "/accept-invite?lang=de&token=" + secret, wantLogged: "/accept-invite?lang=de&token=REDACTED"},
+		{name: "repeated token", target: "/accept-invite?token=" + secret + "&token=" + secret, wantLogged: "/accept-invite?token=REDACTED"},
+		{name: "malformed query", target: "/accept-invite?token=" + secret + "&bad=%zz", wantLogged: "/accept-invite?token=REDACTED"},
+		{name: "query without token stays as sent", target: "/api/search?q=a+b&limit=5", wantLogged: "/api/search?q=a+b&limit=5"},
+		{name: "empty token value", target: "/accept-invite?token=", wantLogged: "/accept-invite?token=REDACTED"},
+		{name: "token key without equals sign", target: "/accept-invite?token", wantLogged: "/accept-invite?token=REDACTED"},
+		{name: "percent-encoded token key", target: "/accept-invite?%74oken=" + secret, wantLogged: "/accept-invite?token=REDACTED"},
+		{name: "malformed token value", target: "/accept-invite?lang=de&token=" + secret + "%zz", wantLogged: "/accept-invite?lang=de"},
+		{name: "semicolon separator", target: "/accept-invite?lang=de;token=" + secret, wantLogged: "/accept-invite?"},
+		{name: "very long query", target: "/accept-invite?pad=" + strings.Repeat("a", 16*1024) + "&token=" + secret, wantLogged: "/accept-invite?pad=" + strings.Repeat("a", 16*1024) + "&token=REDACTED"},
+		{name: "token-like key is not redacted", target: "/api/search?tokens=abc&Token=def", wantLogged: "/api/search?tokens=abc&Token=def"},
+	}
+
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	router := newTestRouter(w, func(o *httpinternal.RouterOptions) { o.DisableRequestLog = false })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+			defer slog.SetDefault(prev)
+
+			router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, tt.target, nil))
+
+			logged := buf.String()
+			if strings.Contains(logged, secret) {
+				t.Fatalf("request log contains the token: %s", logged)
+			}
+			var entry map[string]any
+			for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+				if err := json.Unmarshal([]byte(line), &entry); err == nil && entry["msg"] == "http request" {
+					break
+				}
+				entry = nil
+			}
+			if entry == nil {
+				t.Fatalf("no request log entry found in: %s", logged)
+			}
+			if entry["path"] != tt.wantLogged {
+				t.Fatalf("expected logged path %q, got %q", tt.wantLogged, entry["path"])
+			}
+		})
 	}
 }
 
@@ -3013,6 +3072,304 @@ func TestGetPageByPathEndpoint_SectionReturnsDirectChildrenOnly(t *testing.T) {
 	}
 }
 
+func TestGetPageByPathEndpoint_ReturnsTagsAndProperties(t *testing.T) {
+	sectionKind := tree.NodeKindSection
+	frontmatter := func(id, title string) string {
+		return "---\nleafwiki_id: " + id + "\nleafwiki_title: " + title + `
+tags:
+  - Alpha
+  - beta
+status: published
+meta:
+  owner: alice
+priority: 2
+---
+# Body
+`
+	}
+
+	tests := []struct {
+		name           string
+		kind           *tree.NodeKind
+		markdownFile   func(storageDir string, page *apiPage) string
+		withMetadata   bool
+		wantRawSnippet []string
+	}{
+		{
+			name: "page with frontmatter",
+			kind: pageNodeKind(),
+			markdownFile: func(storageDir string, page *apiPage) string {
+				return filepath.Join(storageDir, "root", filepath.FromSlash(page.Path)+".md")
+			},
+			withMetadata:   true,
+			wantRawSnippet: []string{`"tags":["alpha","beta"]`},
+		},
+		{
+			name: "section with frontmatter",
+			kind: &sectionKind,
+			markdownFile: func(storageDir string, page *apiPage) string {
+				return filepath.Join(storageDir, "root", filepath.FromSlash(page.Path), "index.md")
+			},
+			withMetadata:   true,
+			wantRawSnippet: []string{`"tags":["alpha","beta"]`},
+		},
+		{
+			name:           "page without frontmatter serializes empty tags and properties",
+			kind:           pageNodeKind(),
+			wantRawSnippet: []string{`"tags":[]`, `"properties":{}`},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := createWikiTestInstance(t)
+			defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+			router := createRouterTestInstance(w, t)
+
+			page := createPageViaAPI(t, router, "Meta", "meta", nil, tt.kind)
+			if tt.withMetadata {
+				target := tt.markdownFile(w.GetStorageDir(), page)
+				if err := os.WriteFile(target, []byte(frontmatter(page.ID, "Meta")), 0o644); err != nil {
+					t.Fatalf("WriteFile(%s) failed: %v", target, err)
+				}
+			}
+
+			rec := authenticatedRequest(t, router, http.MethodGet, "/api/pages/by-path?path=meta", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("Expected status 200, got %d - %s", rec.Code, rec.Body.String())
+			}
+			for _, snippet := range tt.wantRawSnippet {
+				if !strings.Contains(rec.Body.String(), snippet) {
+					t.Errorf("expected response to contain %s, got %s", snippet, rec.Body.String())
+				}
+			}
+
+			var resp apiPage
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("Failed to parse JSON: %v", err)
+			}
+			if resp.Kind != *tt.kind {
+				t.Errorf("kind = %q, want %q", resp.Kind, *tt.kind)
+			}
+			if !tt.withMetadata {
+				return
+			}
+			wantProps := map[string]interface{}{"status": "published", "meta.owner": "alice"}
+			if len(resp.Properties) != len(wantProps) {
+				t.Fatalf("properties = %#v, want %#v", resp.Properties, wantProps)
+			}
+			for key, want := range wantProps {
+				if resp.Properties[key] != want {
+					t.Errorf("properties[%q] = %#v, want %#v", key, resp.Properties[key], want)
+				}
+			}
+		})
+	}
+}
+
+// TestGetPageEndpoints_UnusualFrontmatter_ReturnsSameMetadata pins the exact tags/properties JSON
+// that GET /api/pages/:id and GET /api/pages/by-path return for unusual
+// frontmatter; both endpoints must agree.
+func TestGetPageEndpoints_UnusualFrontmatter_ReturnsSameMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		extraYAML string // appended after the leafwiki_* system keys
+		rawBody   string // replaces the whole file when set
+		wantTags  string
+		wantProps string
+		// wantStatus defaults to 200. Invalid YAML already fails while the
+		// tree reads the page content, before metadata is extracted.
+		wantStatus int
+	}{
+		{
+			name:      "only tags",
+			extraYAML: "tags:\n  - One\n  - two\n",
+			wantTags:  `"tags":["one","two"]`,
+			wantProps: `"properties":{}`,
+		},
+		{
+			name:      "tags key in upper case",
+			extraYAML: "Tags:\n  - X\n",
+			wantTags:  `"tags":["x"]`,
+			wantProps: `"properties":{}`,
+		},
+		{
+			name:      "tags as scalar are ignored",
+			extraYAML: "tags: single\n",
+			wantTags:  `"tags":[]`,
+			wantProps: `"properties":{}`,
+		},
+		{
+			name:      "list, number, bool and multiline properties are skipped",
+			extraYAML: "list:\n  - a\n  - b\nnum: 3\nflag: true\nmulti: |\n  l1\n  l2\nkeep: yes please\n",
+			wantTags:  `"tags":[]`,
+			wantProps: `"properties":{"keep":"yes please"}`,
+		},
+		{
+			name:      "nested properties are flattened without leafwiki children",
+			extraYAML: "meta:\n  owner: alice\n  leafwiki_hidden: x\n  deep:\n    level: two\n",
+			wantTags:  `"tags":[]`,
+			wantProps: `"properties":{"meta.deep.level":"two","meta.owner":"alice"}`,
+		},
+		{
+			name:      "unicode keys, values and tags",
+			extraYAML: "tags:\n  - Über\n  - 日本\ngröße: groß\n\"emoji 🎉\": \"ja ✓\"\n",
+			wantTags:  `"tags":["über","日本"]`,
+			wantProps: `"properties":{"emoji 🎉":"ja ✓","größe":"groß"}`,
+		},
+		{
+			name:      "unknown leafwiki_ system key is excluded",
+			extraYAML: "leafwiki_future: secret\nstatus: ok\n",
+			wantTags:  `"tags":[]`,
+			wantProps: `"properties":{"status":"ok"}`,
+		},
+		{
+			name:       "invalid frontmatter fails the content read",
+			rawBody:    "---\ntags: [unclosed\nstatus: : :\n---\n# Body\n",
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:      "unterminated frontmatter yields empty metadata",
+			rawBody:   "---\ntags:\n  - a\n# Body without closing fence\n",
+			wantTags:  `"tags":[]`,
+			wantProps: `"properties":{}`,
+		},
+	}
+
+	// One instance for all rows keeps this test cheap; each row owns its page.
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	router := createRouterTestInstance(w, t)
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			slug := fmt.Sprintf("meta-%d", i)
+			page := createPageViaAPI(t, router, "Meta", slug, nil, pageNodeKind())
+			content := tt.rawBody
+			if content == "" {
+				content = "---\nleafwiki_id: " + page.ID + "\nleafwiki_title: Meta\n" + tt.extraYAML + "---\n# Body\n"
+			}
+			target := filepath.Join(w.GetStorageDir(), "root", slug+".md")
+			if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s) failed: %v", target, err)
+			}
+
+			wantStatus := tt.wantStatus
+			if wantStatus == 0 {
+				wantStatus = http.StatusOK
+			}
+			for _, url := range []string{"/api/pages/" + page.ID, "/api/pages/by-path?path=" + slug} {
+				rec := authenticatedRequest(t, router, http.MethodGet, url, nil)
+				if rec.Code != wantStatus {
+					t.Fatalf("GET %s: expected %d, got %d - %s", url, wantStatus, rec.Code, rec.Body.String())
+				}
+				if wantStatus != http.StatusOK {
+					continue
+				}
+				body := rec.Body.String()
+				for _, want := range []string{tt.wantTags, tt.wantProps} {
+					if !strings.Contains(body, want) {
+						t.Errorf("GET %s: expected %s in %s", url, want, body)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestGetPageEndpoints_BlankIdentifier_ReturnsBadRequest(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		wantCode string
+	}{
+		{name: "whitespace id", url: "/api/pages/%20%20", wantCode: "page_missing_id"},
+		{name: "empty path", url: "/api/pages/by-path?path=", wantCode: "page_missing_path"},
+		{name: "whitespace path", url: "/api/pages/by-path?path=%20", wantCode: "page_missing_path"},
+	}
+
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	router := createRouterTestInstance(w, t)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := authenticatedRequest(t, router, http.MethodGet, tt.url, nil)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d - %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `"code":"`+tt.wantCode+`"`) {
+				t.Errorf("expected error code %q, got %s", tt.wantCode, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestGetPageEndpoints_Section_ChildDepthPerEndpoint pins that by-path returns a
+// section with direct children only while by-id returns the full subtree,
+// and that the children never carry the parent's or their own metadata.
+func TestGetPageEndpoints_Section_ChildDepthPerEndpoint(t *testing.T) {
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	router := createRouterTestInstance(w, t)
+
+	sectionKind := tree.NodeKindSection
+	section := createPageViaAPI(t, router, "Docs", "docs", nil, &sectionKind)
+	child := createPageViaAPI(t, router, "Child", "child", &section.ID, pageNodeKind())
+	createPageViaAPI(t, router, "Grand", "grand", &child.ID, pageNodeKind())
+
+	childFile := filepath.Join(w.GetStorageDir(), "root", "docs", "child", "index.md")
+	if _, err := os.Stat(childFile); err != nil {
+		t.Fatalf("expected child converted to section at %s: %v", childFile, err)
+	}
+	childContent := "---\nleafwiki_id: " + child.ID + "\nleafwiki_title: Child\ntags:\n  - childtag\nowner: bob\n---\n# Child\n"
+	if err := os.WriteFile(childFile, []byte(childContent), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+	sectionFile := filepath.Join(w.GetStorageDir(), "root", "docs", "index.md")
+	sectionContent := "---\nleafwiki_id: " + section.ID + "\nleafwiki_title: Docs\ntags:\n  - sectiontag\n---\n# Docs\n"
+	if err := os.WriteFile(sectionFile, []byte(sectionContent), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	tests := []struct {
+		name           string
+		url            string
+		wantGrandchild bool
+	}{
+		{name: "by path", url: "/api/pages/by-path?path=docs", wantGrandchild: false},
+		{name: "by id", url: "/api/pages/" + section.ID, wantGrandchild: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := authenticatedRequest(t, router, http.MethodGet, tt.url, nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d - %s", rec.Code, rec.Body.String())
+			}
+			var resp map[string]interface{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("Failed to parse JSON: %v", err)
+			}
+			if !strings.Contains(rec.Body.String(), `"tags":["sectiontag"]`) || !strings.Contains(rec.Body.String(), `"properties":{}`) {
+				t.Errorf("expected section's own metadata, got %s", rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "childtag") || strings.Contains(rec.Body.String(), "bob") {
+				t.Errorf("child metadata must not leak into the response, got %s", rec.Body.String())
+			}
+			children, ok := resp["children"].([]interface{})
+			if !ok || len(children) != 1 {
+				t.Fatalf("expected one child, got %v", resp["children"])
+			}
+			first := children[0].(map[string]interface{})
+			grand, _ := first["children"].([]interface{})
+			if got := len(grand) == 1; got != tt.wantGrandchild {
+				t.Errorf("grandchild present = %v, want %v (children: %v)", got, tt.wantGrandchild, first["children"])
+			}
+		})
+	}
+}
+
 func TestGetPagePermalinkEndpoint_ReturnsCurrentPath(t *testing.T) {
 	w := createWikiTestInstance(t)
 	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
@@ -3172,13 +3529,13 @@ func TestReadRouteAccessMatrix(t *testing.T) {
 // routerWithPublicAccess wires the instance-settings registrar (the runtime
 // public-mode toggle endpoint) into a test router, with the same
 // publicaccess.Service backing both the toggle and the read-route gate. The
-// toc-display service is an unrelated throwaway — these tests don't assert
+// pagedisplay service is an unrelated throwaway — these tests don't assert
 // on it.
 func routerWithPublicAccess(t *testing.T, w *wiki.Wiki, svc *publicaccess.Service) *gin.Engine {
 	t.Helper()
-	tocSvc, err := tocdisplay.New(t.TempDir())
+	tocSvc, err := pagedisplay.New(t.TempDir())
 	if err != nil {
-		t.Fatalf("tocdisplay.New: %v", err)
+		t.Fatalf("pagedisplay.New: %v", err)
 	}
 	w.SetInstanceSettingsRoutes(wikiinstancesettings.NewRoutes(svc, tocSvc, w.AuthService(), slog.Default()))
 	return newTestRouter(w, func(o *httpinternal.RouterOptions) {
@@ -3187,10 +3544,10 @@ func routerWithPublicAccess(t *testing.T, w *wiki.Wiki, svc *publicaccess.Servic
 }
 
 // routerWithTocDisplay wires the instance-settings registrar's toc-display
-// toggle endpoint into a test router, with the same tocdisplay.Service
+// toggle endpoint into a test router, with the same pagedisplay.Service
 // backing both the toggle and /api/config. The public-access service is an
 // unrelated throwaway — these tests don't assert on it.
-func routerWithTocDisplay(t *testing.T, w *wiki.Wiki, svc *tocdisplay.Service) *gin.Engine {
+func routerWithTocDisplay(t *testing.T, w *wiki.Wiki, svc *pagedisplay.Service) *gin.Engine {
 	t.Helper()
 	paSvc, err := publicaccess.NewSettingsManaged(t.TempDir())
 	if err != nil {
@@ -3199,8 +3556,24 @@ func routerWithTocDisplay(t *testing.T, w *wiki.Wiki, svc *tocdisplay.Service) *
 	w.SetInstanceSettingsRoutes(wikiinstancesettings.NewRoutes(paSvc, svc, w.AuthService(), slog.Default()))
 	return newTestRouter(w, func(o *httpinternal.RouterOptions) {
 		o.PublicAccess = paSvc
-		o.AlwaysShowToc = svc
+		o.PageDisplay = svc
 	})
+}
+
+// readConfigJSON fetches GET /api/config anonymously and decodes the body.
+func readConfigJSON(t *testing.T, router http.Handler) map[string]any {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/config: %d", rec.Code)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
+		t.Fatalf("decode /api/config: %v", err)
+	}
+	return m
 }
 
 func anonStatus(router http.Handler, method, path string) int {
@@ -3254,21 +3627,7 @@ func TestPublicAccessToggle_ConfigEndpointReflectsTheChange(t *testing.T) {
 	}
 	router := routerWithPublicAccess(t, w, svc)
 
-	readConfig := func() map[string]any {
-		req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
-		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET /api/config: %d", rec.Code)
-		}
-		var m map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-			t.Fatalf("decode /api/config: %v", err)
-		}
-		return m
-	}
-
-	cfg := readConfig()
+	cfg := readConfigJSON(t, router)
 	if cfg["publicAccess"] != false || cfg["publicAccessEnvManaged"] != false {
 		t.Fatalf("initial config: want publicAccess=false envManaged=false, got %v / %v", cfg["publicAccess"], cfg["publicAccessEnvManaged"])
 	}
@@ -3278,7 +3637,7 @@ func TestPublicAccessToggle_ConfigEndpointReflectsTheChange(t *testing.T) {
 		t.Fatalf("enable: %d %s", rec.Code, rec.Body.String())
 	}
 
-	if cfg := readConfig(); cfg["publicAccess"] != true {
+	if cfg := readConfigJSON(t, router); cfg["publicAccess"] != true {
 		t.Fatalf("after enable: want publicAccess=true, got %v", cfg["publicAccess"])
 	}
 }
@@ -3344,27 +3703,13 @@ func TestPublicAccessToggle_BadPayload_Returns400(t *testing.T) {
 func TestTocDisplayToggle_ConfigEndpointReflectsTheChangeOnTheSameEngine(t *testing.T) {
 	w := createWikiTestInstance(t)
 	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
-	svc, err := tocdisplay.New(t.TempDir())
+	svc, err := pagedisplay.New(t.TempDir())
 	if err != nil {
-		t.Fatalf("tocdisplay.New: %v", err)
+		t.Fatalf("pagedisplay.New: %v", err)
 	}
 	router := routerWithTocDisplay(t, w, svc)
 
-	readConfig := func() map[string]any {
-		req := httptest.NewRequest(http.MethodGet, "/api/config", nil)
-		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("GET /api/config: %d", rec.Code)
-		}
-		var m map[string]any
-		if err := json.Unmarshal(rec.Body.Bytes(), &m); err != nil {
-			t.Fatalf("decode /api/config: %v", err)
-		}
-		return m
-	}
-
-	if cfg := readConfig(); cfg["alwaysShowToc"] != false {
+	if cfg := readConfigJSON(t, router); cfg["alwaysShowToc"] != false {
 		t.Fatalf("initial config: want alwaysShowToc=false, got %v", cfg["alwaysShowToc"])
 	}
 
@@ -3373,7 +3718,7 @@ func TestTocDisplayToggle_ConfigEndpointReflectsTheChangeOnTheSameEngine(t *test
 		t.Fatalf("enable: want 200 {\"alwaysShow\":true}, got %d %s", rec.Code, rec.Body.String())
 	}
 
-	if cfg := readConfig(); cfg["alwaysShowToc"] != true {
+	if cfg := readConfigJSON(t, router); cfg["alwaysShowToc"] != true {
 		t.Fatalf("after enable: want alwaysShowToc=true, got %v", cfg["alwaysShowToc"])
 	}
 
@@ -3382,7 +3727,7 @@ func TestTocDisplayToggle_ConfigEndpointReflectsTheChangeOnTheSameEngine(t *test
 		t.Fatalf("disable: want 200, got %d %s", rec.Code, rec.Body.String())
 	}
 
-	if cfg := readConfig(); cfg["alwaysShowToc"] != false {
+	if cfg := readConfigJSON(t, router); cfg["alwaysShowToc"] != false {
 		t.Fatalf("after disable: want alwaysShowToc=false, got %v", cfg["alwaysShowToc"])
 	}
 }
@@ -3390,9 +3735,9 @@ func TestTocDisplayToggle_ConfigEndpointReflectsTheChangeOnTheSameEngine(t *test
 func TestTocDisplayToggle_RequiresAdmin(t *testing.T) {
 	w := createWikiTestInstance(t)
 	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
-	svc, err := tocdisplay.New(t.TempDir())
+	svc, err := pagedisplay.New(t.TempDir())
 	if err != nil {
-		t.Fatalf("tocdisplay.New: %v", err)
+		t.Fatalf("pagedisplay.New: %v", err)
 	}
 	router := routerWithTocDisplay(t, w, svc)
 
@@ -3413,9 +3758,9 @@ func TestTocDisplayToggle_RequiresAdmin(t *testing.T) {
 func TestTocDisplayToggle_BadPayload_Returns400(t *testing.T) {
 	w := createWikiTestInstance(t)
 	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
-	svc, err := tocdisplay.New(t.TempDir())
+	svc, err := pagedisplay.New(t.TempDir())
 	if err != nil {
-		t.Fatalf("tocdisplay.New: %v", err)
+		t.Fatalf("pagedisplay.New: %v", err)
 	}
 	router := routerWithTocDisplay(t, w, svc)
 
@@ -3424,6 +3769,164 @@ func TestTocDisplayToggle_BadPayload_Returns400(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("payload %q: want 400, got %d %s", body, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestContentWidthSetting_ConfigEndpointReflectsTheChange(t *testing.T) {
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	svc, err := pagedisplay.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("pagedisplay.New: %v", err)
+	}
+	router := routerWithTocDisplay(t, w, svc)
+
+	if cfg := readConfigJSON(t, router); cfg["contentWidth"] != "default" || cfg["alwaysShowToc"] != false {
+		t.Fatalf("initial config: want contentWidth=default alwaysShowToc=false, got %v / %v", cfg["contentWidth"], cfg["alwaysShowToc"])
+	}
+
+	rec := authenticatedRequest(t, router, http.MethodPut, "/api/admin/settings/content-width", strings.NewReader(`{"contentWidth":"wide"}`))
+	if rec.Code != http.StatusOK || rec.Body.String() != `{"contentWidth":"wide"}` {
+		t.Fatalf("set wide: want 200 {\"contentWidth\":\"wide\"}, got %d %s", rec.Code, rec.Body.String())
+	}
+	if cfg := readConfigJSON(t, router); cfg["contentWidth"] != "wide" {
+		t.Fatalf("after set: want contentWidth=wide, got %v", cfg["contentWidth"])
+	}
+}
+
+func TestContentWidthSetting_RequiresAdmin(t *testing.T) {
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	svc, err := pagedisplay.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("pagedisplay.New: %v", err)
+	}
+	router := routerWithTocDisplay(t, w, svc)
+
+	if code := anonStatus(router, http.MethodPut, "/api/admin/settings/content-width"); code != http.StatusUnauthorized {
+		t.Fatalf("anon PUT: want 401, got %d", code)
+	}
+
+	authenticatedRequest(t, router, http.MethodPost, "/api/users",
+		strings.NewReader(`{"username":"ed3","email":"ed3@example.com","password":"editorpass","role":"editor"}`))
+	rec := authenticatedRequestAs(t, router, "ed3", "editorpass", http.MethodPut, "/api/admin/settings/content-width", strings.NewReader(`{"contentWidth":"wide"}`))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("editor PUT: want 403, got %d %s", rec.Code, rec.Body.String())
+	}
+	if got := svc.Settings().ContentWidth; got != pagedisplay.ContentWidthDefault {
+		t.Fatalf("content width changed by a rejected request: %q", got)
+	}
+}
+
+func TestContentWidthSetting_BadPayload_Returns400(t *testing.T) {
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	svc, err := pagedisplay.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("pagedisplay.New: %v", err)
+	}
+	router := routerWithTocDisplay(t, w, svc)
+
+	tests := []struct {
+		name     string
+		body     string
+		wantCode string
+	}{
+		{name: "missing field", body: `{}`, wantCode: "instance_settings_invalid_payload"},
+		{name: "wrong type", body: `{"contentWidth":true}`, wantCode: "instance_settings_invalid_payload"},
+		{name: "not json", body: `not json`, wantCode: "instance_settings_invalid_payload"},
+		{name: "unknown width", body: `{"contentWidth":"huge"}`, wantCode: pagedisplay.ErrCodeInvalidContentWidth},
+		{name: "empty width", body: `{"contentWidth":""}`, wantCode: pagedisplay.ErrCodeInvalidContentWidth},
+		{name: "null width", body: `{"contentWidth":null}`, wantCode: "instance_settings_invalid_payload"},
+		{name: "capitalised width", body: `{"contentWidth":"Wide"}`, wantCode: pagedisplay.ErrCodeInvalidContentWidth},
+		{name: "leading space", body: `{"contentWidth":" wide"}`, wantCode: pagedisplay.ErrCodeInvalidContentWidth},
+		{name: "trailing newline", body: `{"contentWidth":"wide\n"}`, wantCode: pagedisplay.ErrCodeInvalidContentWidth},
+		{name: "html in width", body: `{"contentWidth":"<script>alert(1)</script>"}`, wantCode: pagedisplay.ErrCodeInvalidContentWidth},
+		{name: "array", body: `{"contentWidth":["wide"]}`, wantCode: "instance_settings_invalid_payload"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := authenticatedRequest(t, router, http.MethodPut, "/api/admin/settings/content-width", strings.NewReader(tc.body))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("payload %q: want 400, got %d %s", tc.body, rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `"code":"`+tc.wantCode+`"`) {
+				t.Fatalf("payload %q: want error code %q, got %s", tc.body, tc.wantCode, rec.Body.String())
+			}
+		})
+	}
+	if got := svc.Settings().ContentWidth; got != pagedisplay.ContentWidthDefault {
+		t.Fatalf("content width changed by rejected requests: %q", got)
+	}
+}
+
+// Bearer API keys follow role(user) ∩ role(key) on the display-settings
+// routes too: only an admin-scoped key owned by an admin may change them,
+// and the content-width route answers exactly like its toc-display sibling.
+func TestContentWidthSetting_APIKey_OnlyAdminKeyOfAdminMayChange(t *testing.T) {
+	w, router, svc := routerWithDisplayAPIKeys(t)
+
+	tests := []struct {
+		name     string
+		userRole string
+		keyRole  string
+		want     int
+	}{
+		{name: "viewer key of a viewer", userRole: coreauth.RoleViewer, keyRole: coreauth.RoleViewer, want: http.StatusForbidden},
+		{name: "editor key of an editor", userRole: coreauth.RoleEditor, keyRole: coreauth.RoleEditor, want: http.StatusForbidden},
+		{name: "viewer key of an admin", userRole: coreauth.RoleAdmin, keyRole: coreauth.RoleViewer, want: http.StatusForbidden},
+		{name: "editor key of an admin", userRole: coreauth.RoleAdmin, keyRole: coreauth.RoleEditor, want: http.StatusForbidden},
+		{name: "admin key of an admin", userRole: coreauth.RoleAdmin, keyRole: coreauth.RoleAdmin, want: http.StatusOK},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			secret := createAPIKeyFor(t, w, router, fmt.Sprintf("cwkey%d", i), tc.userRole, tc.keyRole)
+
+			tocRec := httptest.NewRecorder()
+			router.ServeHTTP(tocRec, bearerJSONRequest(http.MethodPut, "/api/admin/settings/toc-display", secret, `{"alwaysShow":false}`))
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, bearerJSONRequest(http.MethodPut, "/api/admin/settings/content-width", secret, `{"contentWidth":"wide"}`))
+
+			if rec.Code != tc.want {
+				t.Fatalf("content-width: want %d, got %d %s", tc.want, rec.Code, rec.Body.String())
+			}
+			if rec.Code != tocRec.Code {
+				t.Fatalf("content-width answered %d, toc-display %d for the same key", rec.Code, tocRec.Code)
+			}
+			wantWidth := pagedisplay.ContentWidthDefault
+			if tc.want == http.StatusOK {
+				wantWidth = pagedisplay.ContentWidthWide
+			}
+			if got := svc.Settings().ContentWidth; got != wantWidth {
+				t.Fatalf("content width after request = %q, want %q", got, wantWidth)
+			}
+		})
+	}
+}
+
+// Anonymous visitors of a public wiki render pages with the admin's width:
+// /api/config must carry it whether public access is on or off.
+func TestContentWidthSetting_AnonymousConfig_CarriesWidthWithOrWithoutPublicAccess(t *testing.T) {
+	w := createWikiTestInstance(t)
+	defer test_utils.WrapCloseWithErrorCheck(w.Close, t)
+	svc, err := pagedisplay.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("pagedisplay.New: %v", err)
+	}
+	if err := svc.SetContentWidth(pagedisplay.ContentWidthWide); err != nil {
+		t.Fatalf("SetContentWidth: %v", err)
+	}
+	for _, public := range []bool{false, true} {
+		t.Run(fmt.Sprintf("public=%v", public), func(t *testing.T) {
+			router := newTestRouter(w, func(o *httpinternal.RouterOptions) {
+				o.PublicAccess = publicaccess.Fixed(public)
+				o.PageDisplay = svc
+			})
+			cfg := readConfigJSON(t, router)
+			if cfg["contentWidth"] != pagedisplay.ContentWidthWide || cfg["publicAccess"] != public {
+				t.Fatalf("anonymous config: want contentWidth=wide publicAccess=%v, got %v / %v", public, cfg["contentWidth"], cfg["publicAccess"])
+			}
+		})
 	}
 }
 

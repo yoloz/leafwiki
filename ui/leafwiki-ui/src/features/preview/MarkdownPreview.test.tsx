@@ -1,10 +1,11 @@
-import { act, render } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import type { PageNode } from '@/lib/api/pages'
 import * as assetSrcModule from '@/lib/assetSrc'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { useDesignModeStore } from '@/features/designtoggle/designmode'
 import { useTreeStore } from '@/stores/tree'
+import { collectHighlights } from './collectHighlights'
 import MarkdownPreview from './MarkdownPreview'
 
 function renderPreview(content: string) {
@@ -233,6 +234,66 @@ echo two
     expect(container.querySelector('code')?.textContent).toContain('==')
   })
 
+  it('exposes plain and coloured highlights to collectHighlights, not code or raw marks', () => {
+    const content = [
+      'A ==plain== and a =r=coloured== highlight, `==inline==` code.',
+      '',
+      '<mark>raw</mark>',
+      '',
+      '```',
+      '==fenced==',
+      '```',
+    ].join('\n')
+
+    const { container } = renderPreview(content)
+
+    expect(collectHighlights(container).map((h) => h.text)).toEqual([
+      'plain',
+      'coloured',
+    ])
+  })
+
+  it.each([
+    ['a heading', '## Title with ==mark==', ['mark']],
+    ['a table cell', '| a | b |\n|---|---|\n| ==cell== | x |', ['cell']],
+    ['nested list items', '- ==one==\n  - ==two==', ['one', 'two']],
+    ['a blockquote', '> quoted ==mark==', ['mark']],
+    ['an alert', '> [!NOTE]\n> alert ==mark==', ['mark']],
+    [
+      'a closed collapsible',
+      ':::collapsed Details\nhidden ==mark==\n:::',
+      ['mark'],
+    ],
+    ['a footnote', 'Text[^1]\n\n[^1]: note ==mark==', ['mark']],
+    [
+      'a wikilink inside a highlight',
+      '==see [[Missing Page|alias]]==',
+      ['see alias'],
+    ],
+    [
+      'a soft line break (multi-line)',
+      '==line one\nline two==',
+      ['line one line two'],
+    ],
+    [
+      'Unicode and special characters',
+      '==Ünïcödé 漢字 <&> "q"==',
+      ['Ünïcödé 漢字 <&> "q"'],
+    ],
+    ['an empty marker', 'a ==== b', []],
+  ])('collects highlights inside %s', (_name, content, expected) => {
+    // Links (footnotes, wikilinks) need a router.
+    const { container } = render(
+      <MemoryRouter>
+        <TooltipProvider>
+          <MarkdownPreview content={content} />
+        </TooltipProvider>
+      </MemoryRouter>,
+    )
+
+    expect(collectHighlights(container).map((h) => h.text)).toEqual(expected)
+  })
+
   it('resizes images using the width syntax', () => {
     const { container } = renderPreview(
       '![Resizable image](https://example.com/image.png){width=75%}',
@@ -440,6 +501,99 @@ describe('MarkdownPreview sanitizes raw HTML', () => {
     )
   }
 
+  describe('name attributes', () => {
+    it('drops the name of an image and keeps the image', () => {
+      const { container } = renderRouted(
+        '<img name="cookie" src="https://x.example/a.png">',
+      )
+
+      expect(container.querySelector('img')).not.toBeNull()
+      expect(container.querySelector('img')?.hasAttribute('name')).toBe(false)
+    })
+
+    // Only img is exposed on document by name among the allowed tags; the
+    // others keep it (for example exclusive `<details name>` groups).
+    it.each([
+      ['a', '<a name="usage" href="https://x.example/">Usage</a>', 'usage'],
+      [
+        'details',
+        '<details name="group"><summary>s</summary>x</details>',
+        'group',
+      ],
+      ['input', '<input name="done" type="checkbox">', 'done'],
+    ])('keeps the name of %s', (tag, content, name) => {
+      const { container } = renderRouted(content)
+
+      expect(container.querySelector(tag)?.getAttribute('name')).toBe(name)
+    })
+
+    it('leaves document.cookie readable when content names an image "cookie"', () => {
+      renderRouted('<img name="cookie" src="https://x.example/a.png">')
+
+      expect(typeof document.cookie).toBe('string')
+    })
+
+    it.each([['title'], ['body'], ['head']])(
+      'leaves document.%s intact when an image carries that name',
+      (prop) => {
+        const before = (document as unknown as Record<string, unknown>)[prop]
+        renderRouted(`<img name="${prop}" src="https://x.example/a.png">`)
+
+        expect((document as unknown as Record<string, unknown>)[prop]).toBe(
+          before,
+        )
+      },
+    )
+
+    // Document named access also exposes an img by its id when the img has
+    // a non-empty name, and ids are not prefixed (#869).
+    it.each([
+      ['a name', '<img id="cookie" name="pic" src="https://x.example/a.png">'],
+      ['an empty name', '<img id="cookie" name src="https://x.example/a.png">'],
+    ])(
+      'leaves document.cookie readable when an image with %s has the id "cookie"',
+      (_, content) => {
+        renderRouted(content)
+
+        expect(typeof document.cookie).toBe('string')
+      },
+    )
+
+    it('leaves document.cookie readable when an image without a name has the id "cookie"', () => {
+      renderRouted('<img id="cookie" src="https://x.example/a.png">')
+
+      expect(typeof document.cookie).toBe('string')
+    })
+
+    it('drops the name of an image inside a footnote definition and keeps the footnote ids intact', () => {
+      const { container } = renderRouted(
+        'Note[^cookie]\n\n[^cookie]: <img name="cookie" src="https://x.example/a.png">',
+      )
+
+      expect(
+        container.querySelector('li#user-content-fn-cookie'),
+      ).not.toBeNull()
+      expect(
+        container.querySelector('a[data-footnote-ref]')?.getAttribute('href'),
+      ).toBe('#user-content-fn-cookie')
+      expect(container.querySelector('img')?.hasAttribute('name')).toBe(false)
+      expect(typeof document.cookie).toBe('string')
+    })
+  })
+
+  it('keeps heading, raw HTML and footnote ids unprefixed', () => {
+    const { container } = renderRouted(
+      '# Intro\n\n<h2 id="explicit-id">Raw</h2>\n\nNote[^1]\n\n[^1]: Text',
+    )
+
+    expect(container.querySelector('h1')?.id).toBe('intro')
+    expect(container.querySelector('#explicit-id')?.tagName).toBe('H2')
+    expect(container.querySelector('li#user-content-fn-1')).not.toBeNull()
+    const footnoteRef = container.querySelector('a[data-footnote-ref]')
+    expect(footnoteRef?.getAttribute('href')).toBe('#user-content-fn-1')
+    expect(footnoteRef?.getAttribute('aria-describedby')).toBe('footnote-label')
+  })
+
   it.each([
     ['script tag', 'before <script>window.__xss = 1</script> after', 'script'],
     ['onerror attribute', '<img src="x" onerror="window.__xss = 1">', null],
@@ -474,6 +628,68 @@ describe('MarkdownPreview sanitizes raw HTML', () => {
     }
     expect(eventHandlerAttributes(container)).toEqual([])
     expect(container.innerHTML).not.toContain('window.__xss')
+  })
+
+  it('renders Mermaid in its own sandbox when content uses the old sandbox id', async () => {
+    const mermaid = (await import('mermaid')).default
+    const renderSpy = vi
+      .spyOn(mermaid, 'render')
+      .mockResolvedValue({ svg: '<svg></svg>' } as Awaited<
+        ReturnType<typeof mermaid.render>
+      >)
+
+    try {
+      const { container } = renderRouted(
+        '<div id="mermaid-renderer"></div>\n\n```mermaid\nflowchart TD\n  A[one]\n```',
+      )
+
+      await waitFor(() => expect(renderSpy).toHaveBeenCalled())
+      const lookalike = container.querySelector('#mermaid-renderer')
+      expect(lookalike).not.toBeNull()
+      for (const [, , sandbox] of renderSpy.mock.calls) {
+        expect(sandbox).not.toBe(lookalike)
+        expect(container.contains(sandbox as Node)).toBe(true)
+      }
+    } finally {
+      renderSpy.mockRestore()
+    }
+  })
+
+  // The layout's TOC pane comes after the article, so this heading id is
+  // why PageViewer must not look the pane up by id.
+  it('gives a heading the id of the layout TOC pane when its text matches', () => {
+    const { container } = renderRouted('## App toc pane root')
+
+    expect(container.querySelector('h2')?.id).toBe('app-toc-pane-root')
+  })
+
+  it('gives each of two previews its own Mermaid sandbox', async () => {
+    const mermaid = (await import('mermaid')).default
+    const renderSpy = vi
+      .spyOn(mermaid, 'render')
+      .mockResolvedValue({ svg: '<svg></svg>' } as Awaited<
+        ReturnType<typeof mermaid.render>
+      >)
+
+    try {
+      const diagram = '```mermaid\nflowchart TD\n  A[one]\n```'
+      const first = renderRouted(diagram)
+      const second = renderRouted(diagram.replace('one', 'two'))
+
+      await waitFor(() => expect(renderSpy).toHaveBeenCalledTimes(2))
+      const sandboxes = renderSpy.mock.calls.map(([, , sandbox]) => sandbox)
+      const firstSandbox = sandboxes.find((s) =>
+        first.container.contains(s as Node),
+      )
+      const secondSandbox = sandboxes.find((s) =>
+        second.container.contains(s as Node),
+      )
+      expect(firstSandbox).toBeDefined()
+      expect(secondSandbox).toBeDefined()
+      expect(firstSandbox).not.toBe(secondSandbox)
+    } finally {
+      renderSpy.mockRestore()
+    }
   })
 
   it.each([
@@ -533,6 +749,213 @@ describe('MarkdownPreview sanitizes raw HTML', () => {
     expect(remaining).not.toMatch(/position|z-index|url\(|behavior/i)
   })
 
+  function classTokens(root: Element) {
+    return new Set(
+      Array.from(root.querySelectorAll('[class]')).flatMap((el) =>
+        Array.from(el.classList),
+      ),
+    )
+  }
+
+  it.each([
+    ['div', '<div class="fixed inset-0 z-50 bg-background">x</div>'],
+    ['span', '<span class="fixed inset-0 z-50 opacity-0">x</span>'],
+    ['p', '<p class="absolute top-0 left-0">x</p>'],
+    ['img', '<img class="fixed inset-0" src="https://x.example/a.png">'],
+    ['mark', '<mark class="fixed inset-0">x</mark>'],
+    [
+      'KaTeX classes',
+      '<span class="katex"><span class="brace-left">x</span></span>',
+    ],
+    ['upper-case attribute', '<div CLASS="fixed inset-0">x</div>'],
+    ['mixed-case attribute', '<div ClAsS="fixed inset-0">x</div>'],
+    ['tab and newline separators', '<div class="fixed\tinset-0\nz-50">x</div>'],
+    ['className attribute', '<div className="fixed inset-0">x</div>'],
+    ['unquoted attribute', '<div class=fixed>x</div>'],
+    [
+      'table cells',
+      '<table class="fixed"><tr class="fixed"><td class="fixed inset-0">x</td></tr></table>',
+    ],
+    [
+      'details',
+      '<details class="fixed inset-0"><summary>s</summary>x</details>',
+    ],
+    ['input in a task list', '<input type="checkbox" class="fixed" disabled>'],
+    ['math-inline span', '<span class="math-inline fixed">x</span>'],
+  ])('drops class names that the app styles: %s', (_name, content) => {
+    const { container } = renderRouted(content)
+
+    const tokens = classTokens(container)
+    for (const token of [
+      'fixed',
+      'absolute',
+      'inset-0',
+      'top-0',
+      'left-0',
+      'z-50',
+      'opacity-0',
+      'bg-background',
+      'katex',
+      'brace-left',
+    ]) {
+      expect(tokens).not.toContain(token)
+    }
+  })
+
+  // The li, code, h2 and ul rows were already filtered by the default schema's
+  // per-element rules; they guard that an element's own rule never falls back
+  // to a free class.
+  it.each([
+    [
+      'mark',
+      '<mark class="flexible-marker fixed">x</mark>',
+      'mark',
+      'flexible-marker',
+    ],
+    [
+      'details',
+      '<details class="markdown-collapsible fixed"><summary>s</summary>x</details>',
+      'details',
+      'markdown-collapsible',
+    ],
+    [
+      'li',
+      '<ul><li class="fixed task-list-item">x</li></ul>',
+      'li',
+      'task-list-item',
+    ],
+    [
+      'code',
+      '<p><code class="language-x fixed">x</code></p>',
+      'code',
+      'language-x',
+    ],
+    ['h2', '<h2 class="sr-only fixed">x</h2>', 'h2', 'sr-only'],
+    [
+      'ul',
+      '<ul class="contains-task-list fixed"><li>x</li></ul>',
+      'ul',
+      'contains-task-list',
+    ],
+  ])(
+    'keeps only the allowed name of a mixed class list on %s',
+    (_name, content, selector, kept) => {
+      const { container } = renderRouted(content)
+
+      const el = container.querySelector(selector)
+      expect(el?.classList.contains(kept)).toBe(true)
+      expect(el?.classList.contains('fixed')).toBe(false)
+    },
+  )
+
+  it('keeps the class names markdown features emit', () => {
+    const { container } = renderRouted(`- [x] done
+
+Text[^1] ==marked== and $$a^2$$.
+
+[^1]: Note.
+
+\`\`\`js
+const a = 1
+\`\`\``)
+
+    expect(container.querySelector('ul.contains-task-list')).not.toBeNull()
+    expect(container.querySelector('li.task-list-item')).not.toBeNull()
+    expect(
+      container.querySelector('.markdown-footnotes.footnotes'),
+    ).not.toBeNull()
+    expect(container.querySelector('h2.sr-only')).not.toBeNull()
+    expect(
+      container.querySelector('mark.flexible-marker.flexible-marker-default'),
+    ).not.toBeNull()
+    expect(container.querySelector('code.language-js.hljs')).not.toBeNull()
+    expect(container.querySelector('.katex .msupsub')).not.toBeNull()
+  })
+
+  it('keeps the class names of colored markers', () => {
+    const { container } = renderRouted('=r=red== and =b=blue==')
+
+    expect(container.querySelector('mark.flexible-marker-red')).not.toBeNull()
+    expect(container.querySelector('mark.flexible-marker-blue')).not.toBeNull()
+  })
+
+  it.each([
+    ['flexible-marker', true],
+    ['flexible-marker-default', true],
+    ['flexible-marker-empty', true],
+    ['flexible-marker-red', true],
+    ['flexible-marker-', false],
+    ['flexible-marker-red-fixed', false],
+    ['flexible-marker-RED', false],
+    ['flexible-marker-1', false],
+    ['xflexible-marker', false],
+  ])('marker class %s is kept: %s', (name, kept) => {
+    const { container } = renderRouted(`<mark class="${name}">x</mark>`)
+
+    expect(container.querySelector('mark')?.classList.contains(name)).toBe(kept)
+  })
+
+  it.each([
+    [
+      'collapsible block',
+      ':::collapsible Title\nBody\n:::',
+      'details.markdown-collapsible',
+    ],
+    [
+      'collapsed block',
+      ':::collapsed Title\nBody\n:::',
+      'details.markdown-collapsible',
+    ],
+    ['blockquote', '> quoted', 'blockquote'],
+    [
+      'shoutout block',
+      ':::warning\nBody\n:::',
+      'aside.markdown-shoutout.markdown-shoutout--warning',
+    ],
+    ['code fence with line numbers', '```go=\na := 1\n```', 'code.language-go'],
+    [
+      'plain code fence with line numbers',
+      '```=\na\n```',
+      'code.language-plaintext',
+    ],
+    ['table', '| a | b |\n|---|---|\n| 1 | 2 |', '.table-wrapper table'],
+    ['math in a list', '- item $$a^2$$', 'li .katex'],
+    ['math in a table', '| a |\n|---|\n| $$a^2$$ |', 'td .katex'],
+    ['math in a shoutout', ':::info\n$$a^2$$\n:::', 'aside .katex'],
+    [
+      'math in a collapsible',
+      ':::collapsible T\n$$a^2$$\n:::',
+      'details .katex',
+    ],
+    [
+      'raw HTML language-math code',
+      '<code class="language-math">a^2</code>',
+      '.katex',
+    ],
+  ])('keeps %s', (_name, content, selector) => {
+    const { container } = renderRouted(content)
+
+    expect(container.querySelector(selector)).not.toBeNull()
+  })
+
+  it('renders an undefined macro as a KaTeX error, not as raw TeX only', () => {
+    const { container } = renderRouted('$$\n\\undefinedmacro{x}\n$$')
+
+    expect(container.textContent).toContain('undefinedmacro')
+    expect(
+      container.querySelector('.katex-error, .katex [style*="color"]'),
+    ).not.toBeNull()
+  })
+
+  it('does not trust math in raw HTML code elements', () => {
+    const { container } = renderRouted(
+      '<code class="language-math">\\htmlClass{fixed inset-0}{x}\\href{https://e.example/}{y}</code>',
+    )
+
+    expect(container.querySelector('.fixed, .inset-0')).toBeNull()
+    expect(container.querySelector('a[href^="https://e.example"]')).toBeNull()
+  })
+
   it('keeps whitelisted inline style and allowed media/mark tags', () => {
     const { container } = renderRouted(
       '<p style="color: red; position: fixed">kept</p>\n\n<mark>hi</mark>',
@@ -544,6 +967,79 @@ describe('MarkdownPreview sanitizes raw HTML', () => {
     expect(p?.getAttribute('style') ?? '').toMatch(/color:\s*red/)
     expect(p?.getAttribute('style') ?? '').not.toMatch(/position/)
     expect(container.querySelector('mark')?.textContent).toBe('hi')
+  })
+})
+
+describe('MarkdownPreview math', () => {
+  beforeEach(() => {
+    localStorage.setItem('design-mode', 'light')
+    useDesignModeStore.setState({ mode: 'light' })
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === '(prefers-color-scheme: light)',
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }))
+  })
+
+  it.each([
+    ['a $$ block', '$$\na^2\n$$'],
+    ['a math fence', '```math\na^2\n```'],
+  ])('renders %s as display math', (_name, content) => {
+    const { container } = renderPreview(content)
+
+    const display = container.querySelector('.katex-display .katex')
+    expect(display).not.toBeNull()
+    expect(display?.querySelector('.msupsub')).not.toBeNull()
+  })
+
+  it('renders $$ inside a paragraph as inline math', () => {
+    const { container } = renderPreview('Before $$a^2$$ after')
+
+    expect(container.querySelector('p .katex')).not.toBeNull()
+    expect(container.querySelector('.katex-display')).toBeNull()
+  })
+
+  it('renders the drawn parts of math, such as the square root sign', () => {
+    const { container } = renderPreview('$$\n\\sqrt{x}\n$$')
+
+    expect(container.querySelector('.katex .hide-tail svg path')).not.toBeNull()
+  })
+
+  it.each([
+    ['\\htmlClass', '$$\n\\htmlClass{fixed inset-0 z-50}{x}\n$$', '.fixed'],
+    ['\\htmlId', '$$\n\\htmlId{app-root}{x}\n$$', '#app-root'],
+    ['\\htmlData', '$$\n\\htmlData{foo=bar}{x}\n$$', '[data-foo]'],
+    [
+      '\\includegraphics',
+      '$$\n\\includegraphics{https://e.example/x.png}\n$$',
+      'img',
+    ],
+    ['\\href', '$$\n\\href{https://e.example/}{x}\n$$', 'a'],
+    ['\\url', '$$\n\\url{https://e.example/}\n$$', 'a'],
+  ])('does not trust %s in math', (_name, content, forbidden) => {
+    const { container } = renderPreview(content)
+
+    expect(container.querySelector('.katex, .katex-error')).not.toBeNull()
+    expect(container.querySelector(`.katex ${forbidden}`)).toBeNull()
+  })
+
+  it.each([
+    '$$\n\\htmlStyle{position:fixed;inset:0}{x}\n$$',
+    '$$\n\\color{red;position:fixed}{x}\n$$',
+    '$$\n\\textcolor{red;position:fixed}{x}\n$$',
+    '$$\n\\rule{1px}{1px;position:fixed}\n$$',
+  ])('keeps positioning out of math styles: %s', (content) => {
+    const { container } = renderPreview(content)
+
+    const styles = Array.from(container.querySelectorAll('[style]'))
+      .map((el) => el.getAttribute('style'))
+      .join(';')
+    expect(styles).not.toMatch(/position|inset/i)
   })
 })
 
@@ -614,4 +1110,29 @@ describe('MarkdownPreview plain link tree refresh', () => {
     )
     expect(container.querySelector('a[href="/target"]')).toBeNull()
   })
+
+  it.each([
+    { markdown: '[Target](/target#section)', href: '/target#section' },
+    { markdown: '[Target](target?q=1#section)', href: '/target?q=1#section' },
+    {
+      markdown: '<a href="/target#section">Target</a>',
+      href: '/target#section',
+    },
+  ])(
+    'keeps the heading anchor of $markdown through the sanitizer (#1801)',
+    ({ markdown, href }) => {
+      useTreeStore.setState({ byId: { target }, byPath: { target } })
+      const { container } = render(
+        <MemoryRouter>
+          <TooltipProvider>
+            <MarkdownPreview content={markdown} />
+          </TooltipProvider>
+        </MemoryRouter>,
+      )
+
+      const link = container.querySelector('a')
+      expect(link?.getAttribute('href')).toBe(href)
+      expect(link?.textContent).toBe('Target')
+    },
+  )
 })

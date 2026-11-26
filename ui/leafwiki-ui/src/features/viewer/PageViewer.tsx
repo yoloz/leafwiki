@@ -24,6 +24,7 @@ import {
 import { useConfigStore } from '@/stores/config'
 import { useDialogsStore } from '@/stores/dialogs'
 import { useHotKeysStore } from '@/stores/hotkeys'
+import { useLayoutPortalsStore } from '@/stores/layoutPortals'
 import { useSessionStore } from '@/stores/session'
 import { useTocPanelStore } from '@/stores/tocPanel'
 import { useTreeStore } from '@/stores/tree'
@@ -35,13 +36,15 @@ import { useLocation, useNavigate } from 'react-router'
 import { BacklinkInfo } from '../links/LinkInfo'
 import { extractTocEntries } from '../preview/extractTocEntries'
 import MarkdownPreview from '../preview/MarkdownPreview'
+import { buildAttachmentsSection } from './attachmentsSection'
 import { TocDropdownButton } from '../preview/TocDropdownButton'
 import { TocSidePanel } from '../preview/TocSidePanel'
 import { shouldShowToc } from '../preview/tocVisibility'
-import { useTocScrollSpy } from '../preview/useTocScrollSpy'
+import { useHeadingsSection } from '../preview/useHeadingsSection'
 import Breadcrumbs from './Breadcrumbs'
 import EmptySectionChildrenList from './EmptySectionChildrenList'
 import { PageMetadata } from './PageMetadata'
+import { useHighlightsSection } from './useHighlightsSection'
 import { useScrollToHeadline } from './useScrollToHeadline'
 import { useScrollToSearchQuery } from './useScrollToSearchQuery'
 import { useSetPageTitle } from './useSetPageTitle'
@@ -120,7 +123,7 @@ export default function PageViewer() {
   useScrollToHeadline({ content: page?.content || '', isLoading: loading })
   useScrollToSearchQuery({ content: page?.content || '', isLoading: loading })
   useToolbarActions(actions)
-  useSetPageTitle({ page })
+  useSetPageTitle({ page, settled: notFound || !!error })
 
   useEffect(() => {
     const path = toWikiLookupPath(pathname)
@@ -170,11 +173,34 @@ export default function PageViewer() {
     }
   }, [page?.id])
 
-  const alwaysShowToc = useConfigStore((s) => s.alwaysShowToc)
+  const alwaysShowToc = useConfigStore((s) => s.pageDisplay.alwaysShowToc)
+  // Set on the subheader, metadata bar and viewer alike: the first two are
+  // portaled/rendered outside .page-viewer and must follow the same width
+  // (index.css, [data-content-width]).
+  const contentWidth = useConfigStore((s) => s.pageDisplay.contentWidth)
   const showToc = shouldShowToc(tocEntries.length, alwaysShowToc)
-  const showRightPane = showToc || attachments.length > 0
-  // Single scroll spy for both the dropdown and the side panel.
-  const tocActiveId = useTocScrollSpy(showToc ? tocEntries : [])
+  const visibleTocEntries = useMemo(
+    () => (showToc ? tocEntries : []),
+    [showToc, tocEntries],
+  )
+  // One headings section (and so one scroll spy) for both the dropdown and
+  // the side panel. Sections render in this order; see ADR-0021.
+  const headingsSection = useHeadingsSection(visibleTocEntries)
+  const highlightsSection = useHighlightsSection({
+    content: page?.content,
+    isLoading: loading,
+  })
+  const panelSections = useMemo(
+    () => [
+      headingsSection,
+      highlightsSection,
+      buildAttachmentsSection(attachments),
+    ],
+    [headingsSection, highlightsSection, attachments],
+  )
+  const showRightPane = panelSections.some(
+    (section) => section.items.length > 0,
+  )
 
   const toggleTocCollapsed = useTocPanelStore((state) => state.toggleCollapsed)
   const tocCollapsed = useTocPanelStore((state) => state.collapsed)
@@ -188,14 +214,14 @@ export default function PageViewer() {
     )
     registerHotkey(tocToggleHotkey)
 
-    return () => unregisterHotkey(tocToggleHotkey.keyCombo)
+    return () => unregisterHotkey(tocToggleHotkey)
   }, [showRightPane, toggleTocCollapsed, registerHotkey, unregisterHotkey])
 
   const editorName = displayUser(page?.metadata?.lastAuthor)
   const updatedRelative = formatRelativeTime(page?.metadata?.updatedAt)
   const showUpdated = updatedRelative
-  const subheaderRoot = document.getElementById('app-subheader-root')
-  const tocPaneRoot = document.getElementById('app-toc-pane-root')
+  const subheaderRoot = useLayoutPortalsStore((state) => state.subheaderRoot)
+  const tocPaneRoot = useLayoutPortalsStore((state) => state.tocPaneRoot)
 
   const subheader =
     page && !error && subheaderRoot
@@ -208,6 +234,7 @@ export default function PageViewer() {
                   ? 'page-viewer__subheader--toc-reserved-collapsed'
                   : 'page-viewer__subheader--toc-reserved'),
             )}
+            data-content-width={contentWidth}
           >
             <div className="page-viewer__subheader-inner">
               <div className="page-viewer__subheader-main">
@@ -238,12 +265,7 @@ export default function PageViewer() {
               </div>
               {showRightPane && (
                 <div className="page-viewer__toc-button">
-                  <TocDropdownButton
-                    entries={showToc ? tocEntries : []}
-                    clickable
-                    activeId={tocActiveId}
-                    downloads={attachments}
-                  />
+                  <TocDropdownButton sections={panelSections} />
                 </div>
               )}
             </div>
@@ -254,14 +276,7 @@ export default function PageViewer() {
 
   const tocPane =
     showRightPane && page && !error && tocPaneRoot
-      ? createPortal(
-          <TocSidePanel
-            entries={showToc ? tocEntries : []}
-            activeId={tocActiveId}
-            downloads={attachments}
-          />,
-          tocPaneRoot,
-        )
+      ? createPortal(<TocSidePanel sections={panelSections} />, tocPaneRoot)
       : null
 
   return (
@@ -269,13 +284,16 @@ export default function PageViewer() {
       {subheader}
       {tocPane}
       {page && !error && (
-        <div className="page-viewer__metadata-bar hidden sm:block print:hidden">
+        <div
+          className="page-viewer__metadata-bar hidden sm:block print:hidden"
+          data-content-width={contentWidth}
+        >
           <div className="page-viewer__metadata-bar-inner">
             <PageMetadata page={page} />
           </div>
         </div>
       )}
-      <div className="page-viewer">
+      <div className="page-viewer" data-content-width={contentWidth}>
         {page && !error && (
           <div className="page-viewer__body">
             <article className="page-viewer__content">

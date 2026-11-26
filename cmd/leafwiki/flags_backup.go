@@ -188,7 +188,7 @@ func (o *backupOptions) Flags() []cli.Flag {
 			Category:    catSnapshots,
 			Usage:       "SSH port for snapshot upload",
 			Value:       "22",
-			Sources:     envVars("LEAFWIKI_SNAPSHOT_SSH_PORT"),
+			Sources:     envPortVars("LEAFWIKI_SNAPSHOT_SSH_PORT"),
 			Config:      trimmed,
 		},
 		&cli.StringFlag{

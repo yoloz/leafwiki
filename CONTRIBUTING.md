@@ -141,8 +141,9 @@ with another password, delete that directory for a fresh wiki or run
 Before submitting the code execute `npm run format` in the `ui/leafwiki-ui` directory.
 If you change the e2e tests, please also run `npm run format` in the `e2e` directory.
 In the repository root, `make ci` runs `make verify` (small repository checks), `make lint`,
-`make test`, `make cross` (build and vet for Windows and macOS) and `make ui-check` (frontend
-install, lint, format check, tests and build); each also runs on its own. CI additionally runs
+`make deadcode` (unreachable Go functions), `make test`, `make cross` (build and vet for
+Windows and macOS) and `make ui-check` (frontend install, lint, format check, tests and build);
+each also runs on its own. CI additionally runs
 the linux/386 tests, govulncheck, Trivy, the install-script test, the e2e lint and the E2E
 suites, and builds the Dev Container (with `make doctor` inside) on PRs that change its
 inputs. Trivy scans the Go and npm dependencies on every PR (filesystem scans in the backend
@@ -226,6 +227,27 @@ Common commit types:
 
 Also accepted: `perf`, `style`, `ci`, `build`, `revert`. A `!` after the type or scope marks a
 breaking change (`feat(api)!: …`). Squash `fixup!`/`squash!`/WIP commits before review.
+
+If users or admins will notice the change (a default, a flag, a migration, different
+behaviour), add a `Behavior-Change:` trailer to the commit: one sentence on what they notice
+and what to do. The release notes list every such trailer at the top, whatever the commit
+type; without one, a `refactor`, `chore` or other internal commit only shows up as a count.
+Use one trailer per change; a commit may carry several. `Behaviour-Change:` works too.
+
+```
+feat(example): rename the frobnicate setting
+
+Behavior-Change: The `frobnicate` setting is now called `frob`; rename it in your config
+  before upgrading.
+```
+
+Git only reads trailers from the last paragraph of the message, so:
+
+- Keep the value on one line, or indent every continuation line (as above); an unindented
+  second line ends the trailer block and the trailer is lost.
+- On a squash merge, GitHub's default message stacks the commit bodies and ends with
+  `---------` and `Co-authored-by:` lines. Move the `Behavior-Change:` lines into that last
+  paragraph (next to `Co-authored-by:`), or they won't reach the release notes.
 
 The `Commit messages` workflow checks every commit of a PR; run it locally with
 `make verify-commits BASE=origin/main`. It is informational, not a required check: a PR with

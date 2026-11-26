@@ -15,13 +15,23 @@ func (t *TreeService) FindPagesByTitle(title string) []*PageNode {
 	if t.tree == nil {
 		return nil
 	}
+	return t.nodesWithTitleLocked(title)
+}
 
+// titleKey is the key of the title index: titles match case-insensitively.
+func titleKey(title string) string {
+	return strings.ToLower(title)
+}
+
+// nodesWithTitleLocked returns the nodes whose title matches title (trimmed,
+// case-insensitive), or nil for a blank title or no match. The caller holds
+// the read lock.
+func (t *TreeService) nodesWithTitleLocked(title string) []*PageNode {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return nil
 	}
-
-	nodes := t.nodesByTitle[strings.ToLower(title)]
+	nodes := t.nodesByTitle[titleKey(title)]
 	if len(nodes) == 0 {
 		return nil
 	}
@@ -45,6 +55,32 @@ func (t *TreeService) FindPageByID(id string) (*PageNode, error) {
 	})
 
 	return result, err
+}
+
+// IsInSubtree reports whether the node id is rootID itself or one of its
+// descendants, as the tree is right now. It walks the parent chain under the
+// read lock: a caller holding a *PageNode from FindPageByID must not walk
+// Parent itself, because a concurrent move rewrites those pointers. Unknown
+// or empty ids return ErrPageNotFound.
+func (t *TreeService) IsInSubtree(id, rootID string) (bool, error) {
+	var in bool
+	err := t.withRLockedTree(func() error {
+		if t.tree == nil {
+			return ErrTreeNotLoaded
+		}
+		node := t.getNodeByIDLocked(id)
+		if node == nil || t.getNodeByIDLocked(rootID) == nil {
+			return ErrPageNotFound
+		}
+		for n := node; n != nil; n = n.Parent {
+			if n.ID == rootID {
+				in = true
+				return nil
+			}
+		}
+		return nil
+	})
+	return in, err
 }
 
 func (t *TreeService) getNodeByIDLocked(id string) *PageNode {
@@ -106,7 +142,7 @@ func (t *TreeService) addTitleIndexForNodeLocked(node *PageNode) {
 	if node == nil || node.Title == "" {
 		return
 	}
-	key := strings.ToLower(node.Title)
+	key := titleKey(node.Title)
 	t.nodesByTitle[key] = append(t.nodesByTitle[key], node)
 }
 
@@ -114,7 +150,7 @@ func (t *TreeService) removeTitleIndexForNodeLocked(node *PageNode) {
 	if node == nil || node.Title == "" {
 		return
 	}
-	key := strings.ToLower(node.Title)
+	key := titleKey(node.Title)
 	nodes := t.nodesByTitle[key]
 	filtered := nodes[:0]
 	for _, n := range nodes {

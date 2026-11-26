@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,10 +20,10 @@ import (
 	sharederrors "github.com/perber/wiki/internal/core/shared/errors"
 	"github.com/perber/wiki/internal/core/shared/sqliteutil"
 	"github.com/perber/wiki/internal/favorites"
+	"github.com/perber/wiki/internal/pagedisplay"
 	"github.com/perber/wiki/internal/publicaccess"
 	snapshotSvc "github.com/perber/wiki/internal/snapshot"
 	"github.com/perber/wiki/internal/test_utils"
-	"github.com/perber/wiki/internal/tocdisplay"
 	"github.com/perber/wiki/internal/usersettings"
 )
 
@@ -37,7 +38,7 @@ type managerFixture struct {
 	authService  *auth.AuthService
 	branding     *branding.BrandingService
 	publicAccess *publicaccess.Service
-	tocDisplay   *tocdisplay.Service
+	pageDisplay  *pagedisplay.Service
 	resyncCalls  int
 }
 
@@ -78,19 +79,19 @@ func newManagerFixtureWithBranding(t *testing.T, wikiVersion, brandingJSON strin
 	if err != nil {
 		t.Fatalf("NewSettingsManaged failed: %v", err)
 	}
-	tocDisplayService, err := tocdisplay.New(dataDir)
+	pageDisplayService, err := pagedisplay.New(dataDir)
 	if err != nil {
-		t.Fatalf("tocdisplay.New failed: %v", err)
+		t.Fatalf("pagedisplay.New failed: %v", err)
 	}
 
-	f := &managerFixture{dataDir: dataDir, snapshotID: snapshotID, authService: authService, branding: brandingService, publicAccess: publicAccessService, tocDisplay: tocDisplayService}
+	f := &managerFixture{dataDir: dataDir, snapshotID: snapshotID, authService: authService, branding: brandingService, publicAccess: publicAccessService, pageDisplay: pageDisplayService}
 	f.manager = NewManager(Config{
 		SnapshotManager: snapshotMgr,
 		DataDir:         dataDir,
 		WikiVersion:     wikiVersion,
 		WriteGate:       NewWriteGate(),
 		AuthService:     authService,
-		Reloadables:     []settings.Reloadable{brandingService, publicAccessService, tocDisplayService},
+		Reloadables:     []settings.Reloadable{brandingService, publicAccessService, pageDisplayService},
 		TriggerResync:   func() { f.resyncCalls++ },
 	})
 
@@ -129,9 +130,7 @@ func newFullManagerFixtureWithBranding(t *testing.T, brandingJSON string) *fullM
 		RootDir:            filepath.Join(src, "root"),
 		BrandingConfigFile: brandingConfigFile,
 		UsersDBPath:        filepath.Join(src, "users.db"),
-		APIKeysDBPath:      filepath.Join(src, "api_keys.db"),
-		FavoritesDBPath:    filepath.Join(src, "favorites.db"),
-		UserSettingsDBPath: filepath.Join(src, "usersettings.db"),
+		StateDBPaths:       []string{filepath.Join(src, "api_keys.db"), filepath.Join(src, "favorites.db"), filepath.Join(src, "usersettings.db")},
 		WikiVersion:        "v1.0.0",
 	})
 	if err := snapshotMgr.RunOnce(context.Background()); err != nil {
@@ -201,10 +200,12 @@ func newFullManagerFixtureWithBranding(t *testing.T, brandingJSON string) *fullM
 		WikiVersion:     "v1.0.0",
 		WriteGate:       NewWriteGate(),
 		AuthService:     authService,
-		APIKeyService:   apiKeyService,
-		Favorites:       favoritesStore,
-		UserSettings:    userSettingsService,
-		Reloadables:     []settings.Reloadable{brandingService},
+		Stores: []LiveStore{
+			{File: "api_keys.db", Store: apiKeyService},
+			{File: "favorites.db", Store: favoritesStore},
+			{File: "usersettings.db", Store: userSettingsService},
+		},
+		Reloadables: []settings.Reloadable{brandingService},
 	})
 	return f
 }
@@ -265,10 +266,10 @@ func TestManager_Restore_HappyPath(t *testing.T) {
 
 	// AuthService was hot-swapped to the restored users.db: the live-only
 	// admin is gone, the snapshot's admin can log in.
-	if _, err := f.authService.Login("live-admin", "live-password-123"); err == nil {
+	if _, err := f.authService.Login("live-admin", "live-password-123", ""); err == nil {
 		t.Fatal("expected the live-only user to no longer exist after restore")
 	}
-	if _, err := f.authService.Login("snapshot-admin", "snapshot-password-123"); err != nil {
+	if _, err := f.authService.Login("snapshot-admin", "snapshot-password-123", ""); err != nil {
 		t.Fatalf("expected the snapshot's user to be able to log in after restore: %v", err)
 	}
 
@@ -284,7 +285,7 @@ func TestManager_Restore_HappyPath(t *testing.T) {
 	if !f.publicAccess.Enabled() {
 		t.Error("expected public access reloaded from the restored public-access.json")
 	}
-	if !f.tocDisplay.AlwaysShow() {
+	if !f.pageDisplay.Settings().AlwaysShowToc {
 		t.Error("expected always-show-TOC reloaded from the restored toc-display.json")
 	}
 }
@@ -521,10 +522,10 @@ func TestManager_Restore_RollsBackOnBrandingReloadFailure(t *testing.T) {
 	// handle back to the restored-to-original users.db, not just the file on
 	// disk, otherwise it would keep silently serving the rolled-back-away
 	// content through an orphaned (unlinked but still open) file handle.
-	if _, err := f.authService.Login("live-admin", "live-password-123"); err != nil {
+	if _, err := f.authService.Login("live-admin", "live-password-123", ""); err != nil {
 		t.Fatalf("expected the original live user to be able to log in again after rollback: %v", err)
 	}
-	if _, err := f.authService.Login("snapshot-admin", "snapshot-password-123"); err == nil {
+	if _, err := f.authService.Login("snapshot-admin", "snapshot-password-123", ""); err == nil {
 		t.Fatal("expected the snapshot's user to no longer exist after rollback")
 	}
 }
@@ -562,7 +563,7 @@ func TestManager_Restore_RollsBackAllFourStoresOnBrandingReloadFailure(t *testin
 		t.Error("expected write gate to be disengaged after a successful rollback")
 	}
 
-	if _, err := f.authService.Login("live-admin", "live-password-123"); err != nil {
+	if _, err := f.authService.Login("live-admin", "live-password-123", ""); err != nil {
 		t.Fatalf("expected the original live user to be able to log in again after rollback: %v", err)
 	}
 
@@ -634,12 +635,12 @@ func TestManager_Restore_WALCleanupFailure_RecoversWithoutTouchingLiveFiles(t *t
 	// sidecar this test blocks (usersettings.db-wal) can't be un-blocked
 	// mid-test, so a genuine reopen attempt against it would fail too,
 	// entangling "did cleanup fail" with "did recovery fail" and making the
-	// test unable to tell them apart. reopenAllStores is nil-guarded per
-	// store, so leaving UserSettings out isolates the WAL-cleanup failure
+	// test unable to tell them apart. reopenAllStores only reopens registered
+	// stores, so leaving UserSettings out isolates the WAL-cleanup failure
 	// from the recovery step, letting this test prove recovery succeeds for
 	// the *other* three stores (Auth/APIKeys/Favorites), which is the actual
 	// bug under test.
-	f.manager.cfg.UserSettings = nil
+	f.manager.cfg.Stores = withoutStore(f.manager.cfg.Stores, "usersettings.db")
 
 	// Force removeStaleWALSidecars to fail for usersettings.db: a non-empty
 	// directory at the sidecar's path makes os.Remove fail with "directory
@@ -648,7 +649,10 @@ func TestManager_Restore_WALCleanupFailure_RecoversWithoutTouchingLiveFiles(t *t
 	// MkdirTemp extractAndValidateWithLimits does inside dataDir). The real
 	// UserSettingsStore opened by newFullManagerFixtureWithBranding already
 	// left a genuine (harmless) usersettings.db-wal file behind, so it's
-	// removed first before a blocking directory takes its place.
+	// removed first before a blocking directory takes its place. The store is
+	// closed first because Windows can't remove a file that is still open
+	// (#1698); the fixture's own cleanup tolerates the second Close.
+	test_utils.WrapCloseWithErrorCheck(f.userSettings.Close, t)
 	walPath := filepath.Join(f.dataDir, "usersettings.db-wal")
 	if err := os.RemoveAll(walPath); err != nil {
 		t.Fatalf("failed to remove existing usersettings.db-wal: %v", err)
@@ -677,7 +681,7 @@ func TestManager_Restore_WALCleanupFailure_RecoversWithoutTouchingLiveFiles(t *t
 	}
 
 	// The three stores this run actually reopens must be usable again.
-	if _, err := f.authService.Login("live-admin", "live-password-123"); err != nil {
+	if _, err := f.authService.Login("live-admin", "live-password-123", ""); err != nil {
 		t.Fatalf("expected AuthService to be usable again after recovery: %v", err)
 	}
 	if err := f.favoritesStore.Add("user-1", "another-page"); err != nil {
@@ -800,7 +804,7 @@ func TestManager_RestoreFromUpload_HappyPath(t *testing.T) {
 		t.Error("expected write gate to be disengaged after a successful restore")
 	}
 
-	if _, err := f.authService.Login("snapshot-admin", "snapshot-password-123"); err != nil {
+	if _, err := f.authService.Login("snapshot-admin", "snapshot-password-123", ""); err != nil {
 		t.Fatalf("expected the snapshot's user to be able to log in after restore: %v", err)
 	}
 }
@@ -845,6 +849,64 @@ func TestManager_RestoreFromUpload_InvalidZip_FailsCleanlyWithoutTouchingFiles(t
 	}
 	if _, err := os.Stat(filepath.Join(f.dataDir, "root", "live-page.md")); err != nil {
 		t.Errorf("expected live content to be completely untouched: %v", err)
+	}
+}
+
+// TestManager_RestoreFromUpload_AppliesTheUploadEntryCap pins that restore
+// by upload runs under uploadExtractionLimits, not the lower import default:
+// a zip with more entries than DefaultZipExtractionLimits.MaxEntries passes
+// the entry-count check (and then fails on the missing required entries),
+// while one above uploadExtractionLimits.MaxEntries is rejected for its
+// entry count. Directory-only entries keep the fixtures small.
+func TestManager_RestoreFromUpload_AppliesTheUploadEntryCap(t *testing.T) {
+	tests := []struct {
+		name      string
+		entries   int
+		wantInErr string
+		notInErr  string
+	}{
+		{"above the import cap", coreshared.DefaultZipExtractionLimits.MaxEntries + 1, "missing required entry", coreshared.ErrTooManyEntries.Error()},
+		{"above the upload cap", uploadExtractionLimits.MaxEntries + 1, coreshared.ErrTooManyEntries.Error(), "missing required entry"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newManagerFixture(t, "v1.0.0")
+
+			zipPath := filepath.Join(t.TempDir(), "entries.zip")
+			zf, err := os.Create(zipPath)
+			if err != nil {
+				t.Fatalf("failed to create zip file: %v", err)
+			}
+			zw := zip.NewWriter(zf)
+			for i := 0; i < tt.entries; i++ {
+				if _, err := zw.Create(fmt.Sprintf("d%d/", i)); err != nil {
+					t.Fatalf("failed to create zip entry: %v", err)
+				}
+			}
+			if err := zw.Close(); err != nil {
+				t.Fatalf("failed to close zip writer: %v", err)
+			}
+			if err := zf.Close(); err != nil {
+				t.Fatalf("failed to close zip file: %v", err)
+			}
+
+			upload, err := os.Open(zipPath)
+			if err != nil {
+				t.Fatalf("failed to open zip: %v", err)
+			}
+			defer func() { _ = upload.Close() }()
+
+			if err := f.manager.TriggerRestoreFromUpload(upload); err != nil {
+				t.Fatalf("TriggerRestoreFromUpload failed: %v", err)
+			}
+			status := waitForRestoreDone(t, f.manager)
+			if !strings.Contains(status.Error, tt.wantInErr) || strings.Contains(status.Error, tt.notInErr) {
+				t.Fatalf("status.Error = %q, want it to contain %q and not %q", status.Error, tt.wantInErr, tt.notInErr)
+			}
+			if _, err := os.Stat(filepath.Join(f.dataDir, "root", "live-page.md")); err != nil {
+				t.Errorf("expected live content to be untouched: %v", err)
+			}
+		})
 	}
 }
 
@@ -959,6 +1021,8 @@ func TestManager_RestoreFromUpload_CleansUpTempFileAfterCompletion(t *testing.T)
 			t.Fatalf("TriggerRestoreFromUpload failed: %v", err)
 		}
 		waitForRestoreDone(t, f.manager)
+		// The job reports Done before the deferred cleanup of the temp file runs.
+		f.manager.Wait()
 
 		if matches := tempGlob(f.dataDir); len(matches) != 0 {
 			t.Errorf("expected upload temp file to be cleaned up, found: %v", matches)
@@ -993,6 +1057,8 @@ func TestManager_RestoreFromUpload_CleansUpTempFileAfterCompletion(t *testing.T)
 		if status.Error == "" {
 			t.Fatal("expected the invalid zip to fail validation")
 		}
+		// The job reports Done before the deferred cleanup of the temp file runs.
+		f.manager.Wait()
 
 		if matches := tempGlob(f.dataDir); len(matches) != 0 {
 			t.Errorf("expected upload temp file to be cleaned up even on failure, found: %v", matches)
@@ -1065,11 +1131,11 @@ func TestManager_Restore_HappyPath_PreservesAPIKeys(t *testing.T) {
 	snapshotToken := createRealAPIKeysDB(t, src, snapshotOwnerID, "snapshot-key")
 
 	snapshotMgr := snapshotSvc.NewManager(snapshotSvc.Config{
-		BackupsDir:    filepath.Join(src, "backups"),
-		RootDir:       filepath.Join(src, "root"),
-		UsersDBPath:   filepath.Join(src, "users.db"),
-		APIKeysDBPath: filepath.Join(src, "api_keys.db"),
-		WikiVersion:   "v1.0.0",
+		BackupsDir:   filepath.Join(src, "backups"),
+		RootDir:      filepath.Join(src, "root"),
+		UsersDBPath:  filepath.Join(src, "users.db"),
+		StateDBPaths: []string{filepath.Join(src, "api_keys.db")},
+		WikiVersion:  "v1.0.0",
 	})
 	if err := snapshotMgr.RunOnce(context.Background()); err != nil {
 		t.Fatalf("failed to build fixture snapshot: %v", err)
@@ -1114,7 +1180,7 @@ func TestManager_Restore_HappyPath_PreservesAPIKeys(t *testing.T) {
 		WikiVersion:     "v1.0.0",
 		WriteGate:       NewWriteGate(),
 		AuthService:     authService,
-		APIKeyService:   apiKeyService,
+		Stores:          []LiveStore{{File: "api_keys.db", Store: apiKeyService}},
 		Reloadables:     []settings.Reloadable{brandingService},
 	})
 
@@ -1152,12 +1218,11 @@ func TestManager_Restore_HappyPath_PreservesFavoritesAndUserSettings(t *testing.
 	createRealUserSettingsDB(t, src, "user-1", "de")
 
 	snapshotMgr := snapshotSvc.NewManager(snapshotSvc.Config{
-		BackupsDir:         filepath.Join(src, "backups"),
-		RootDir:            filepath.Join(src, "root"),
-		UsersDBPath:        filepath.Join(src, "users.db"),
-		FavoritesDBPath:    filepath.Join(src, "favorites.db"),
-		UserSettingsDBPath: filepath.Join(src, "usersettings.db"),
-		WikiVersion:        "v1.0.0",
+		BackupsDir:   filepath.Join(src, "backups"),
+		RootDir:      filepath.Join(src, "root"),
+		UsersDBPath:  filepath.Join(src, "users.db"),
+		StateDBPaths: []string{filepath.Join(src, "favorites.db"), filepath.Join(src, "usersettings.db")},
+		WikiVersion:  "v1.0.0",
 	})
 	if err := snapshotMgr.RunOnce(context.Background()); err != nil {
 		t.Fatalf("failed to build fixture snapshot: %v", err)
@@ -1209,9 +1274,11 @@ func TestManager_Restore_HappyPath_PreservesFavoritesAndUserSettings(t *testing.
 		WikiVersion:     "v1.0.0",
 		WriteGate:       NewWriteGate(),
 		AuthService:     authService,
-		Favorites:       favoritesStore,
-		UserSettings:    userSettingsService,
-		Reloadables:     []settings.Reloadable{brandingService},
+		Stores: []LiveStore{
+			{File: "favorites.db", Store: favoritesStore},
+			{File: "usersettings.db", Store: userSettingsService},
+		},
+		Reloadables: []settings.Reloadable{brandingService},
 	})
 
 	if err := manager.TriggerRestore(snapshotID); err != nil {
@@ -1324,14 +1391,13 @@ func TestManager_Restore_HappyPath_ReloadsUserResolverCache(t *testing.T) {
 }
 
 // TestManager_Restore_APIKeyManagementDisabled_DoesNotError covers the common
-// case (API key management is off by default): cfg.APIKeyService is nil and
-// no api_keys.db was ever created, so restore must complete normally — the
-// new APIKeyService nil-guards in runFromZipPath/rollbackOrIntervene must not
-// panic, and swapNames' "skip items absent from the staging dir" behavior
-// must leave the missing api_keys.db alone.
+// case (API key management is off by default): no api_keys.db store is
+// registered in Config.Stores and no api_keys.db was ever created, so restore
+// must complete normally, and swapNames' "skip items absent from the staging
+// dir" behavior must leave the missing api_keys.db alone.
 func TestManager_Restore_APIKeyManagementDisabled_DoesNotError(t *testing.T) {
 	f := newManagerFixture(t, "v1.0.0")
-	f.manager.cfg.APIKeyService = nil
+	f.manager.cfg.Stores = withoutStore(f.manager.cfg.Stores, "api_keys.db")
 
 	if err := f.manager.TriggerRestore(f.snapshotID); err != nil {
 		t.Fatalf("TriggerRestore failed: %v", err)
@@ -1342,5 +1408,72 @@ func TestManager_Restore_APIKeyManagementDisabled_DoesNotError(t *testing.T) {
 	}
 	if status.NeedsIntervention {
 		t.Fatal("expected NeedsIntervention = false on a successful restore")
+	}
+}
+
+// withoutStore returns stores minus the entry for file, mirroring the
+// composition root not registering a store whose feature is off.
+func withoutStore(stores []LiveStore, file string) []LiveStore {
+	var out []LiveStore
+	for _, s := range stores {
+		if s.File != file {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+type recordingStore struct {
+	name string
+	log  *[]string
+	real SwappableStore
+}
+
+func (r *recordingStore) PauseForSwap() error {
+	*r.log = append(*r.log, "pause "+r.name)
+	return r.real.PauseForSwap()
+}
+
+func (r *recordingStore) Replace(dir string) error {
+	*r.log = append(*r.log, "replace "+r.name)
+	return r.real.Replace(dir)
+}
+
+// Stores are paused and reopened in registration order, and a database whose
+// live store is not registered is still swapped on disk.
+func TestManager_Restore_StoresPausedAndReopenedInOrder_UnregisteredDBStillSwapped(t *testing.T) {
+	f := newFullManagerFixtureWithBranding(t, `{"siteName":"Snapshot Site"}`)
+	var log []string
+	f.manager.cfg.Stores = []LiveStore{
+		{File: "api_keys.db", Store: &recordingStore{"api_keys.db", &log, f.apiKeyService}},
+		{File: "usersettings.db", Store: &recordingStore{"usersettings.db", &log, f.userSettings}},
+	}
+	// favorites.db is deliberately not registered (as if its feature were off):
+	// release its handle ourselves so Windows can rename the file.
+	if err := f.favoritesStore.PauseForSwap(); err != nil {
+		t.Fatalf("PauseForSwap: %v", err)
+	}
+	want, err := os.ReadFile(filepath.Join(f.dataDir, "favorites.db"))
+	if err != nil {
+		t.Fatalf("read live favorites.db: %v", err)
+	}
+
+	if err := f.manager.TriggerRestore(f.snapshotID); err != nil {
+		t.Fatalf("TriggerRestore failed: %v", err)
+	}
+	if status := waitForRestoreDone(t, f.manager); status.Error != "" {
+		t.Fatalf("restore failed: %s", status.Error)
+	}
+
+	wantLog := "[pause api_keys.db pause usersettings.db replace api_keys.db replace usersettings.db]"
+	if fmt.Sprint(log) != wantLog {
+		t.Errorf("store calls = %v, want %s", log, wantLog)
+	}
+	got, err := os.ReadFile(filepath.Join(f.dataDir, "favorites.db"))
+	if err != nil {
+		t.Fatalf("read favorites.db after restore: %v", err)
+	}
+	if string(got) == string(want) {
+		t.Error("favorites.db was not swapped although its store was unregistered")
 	}
 }

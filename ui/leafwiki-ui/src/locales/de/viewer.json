@@ -20,7 +20,9 @@
     "subpagesAriaLabel": "Unterseiten von {{title}}",
     "sectionSuffix": "(Bereich)",
     "updatedByLabel": "Aktualisiert von {{editor}} · {{time}}",
-    "updatedLabel": "Aktualisiert {{time}}"
+    "updatedLabel": "Aktualisiert {{time}}",
+    "subpageCount_one": "{{count}} Unterseite",
+    "subpageCount_other": "{{count}} Unterseiten"
   },
   "markdownPreview": {
     "renderError": "Diese Seite enthält Markdown, das nicht sicher gerendert werden konnte.",
@@ -70,6 +72,7 @@
   "toc": {
     "title": "Inhaltsverzeichnis",
     "onThisPage": "Auf dieser Seite",
+    "highlights": "Hervorhebungen",
     "downloads": "Angehängte Medien",
     "collapse": "Inhaltsverzeichnis einklappen",
     "expand": "Inhaltsverzeichnis ausklappen"
@@ -255,6 +258,9 @@
       },
       "cancelRename": {
         "action": "Umbenennen abbrechen"
+      },
+      "closeSearchSyntaxHelp": {
+        "action": "Suchsyntax-Hilfe schließen"
       }
     }
   }

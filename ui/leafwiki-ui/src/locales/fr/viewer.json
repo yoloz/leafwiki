@@ -20,7 +20,9 @@
     "subpagesAriaLabel": "Sous-pages de {{title}}",
     "sectionSuffix": "(Section)",
     "updatedByLabel": "Mis à jour par {{editor}} · {{time}}",
-    "updatedLabel": "Mis à jour {{time}}"
+    "updatedLabel": "Mis à jour {{time}}",
+    "subpageCount_one": "{{count}} sous-page",
+    "subpageCount_other": "{{count}} sous-pages"
   },
   "markdownPreview": {
     "renderError": "Cette page contient du Markdown qui n'a pas pu être rendu de manière sécurisée.",
@@ -70,6 +72,7 @@
   "toc": {
     "title": "Table des matières",
     "onThisPage": "Sur cette page",
+    "highlights": "Surlignages",
     "downloads": "Médias joints",
     "collapse": "Réduire la table des matières",
     "expand": "Développer la table des matières"
@@ -255,6 +258,9 @@
       },
       "cancelRename": {
         "action": "Annuler le renommage"
+      },
+      "closeSearchSyntaxHelp": {
+        "action": "Fermer l'aide sur la syntaxe de recherche"
       }
     }
   }

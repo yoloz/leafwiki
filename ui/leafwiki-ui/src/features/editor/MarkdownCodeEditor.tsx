@@ -23,6 +23,7 @@ import {
   internalLinkCompletionSource,
   wikiLinkCompletionSource,
 } from './internalLinkCompletion'
+import { spellcheck as spellcheckExtension } from './spellcheck'
 
 // Extensions toggled via lineWrapCompartment
 const noWrapExtensions = EditorView.theme({
@@ -50,6 +51,7 @@ type MarkdownCodeEditorProps = {
   onCursorLineChange?: (line: number) => void
   editorViewRef: React.RefObject<EditorView | null>
   lineWrap?: boolean
+  spellcheck?: boolean
   // Rich paste (HTML → Markdown) is intentionally not wired to plain Ctrl/Cmd+V
   // yet — it's only reachable via Ctrl/Cmd+Shift+V and the toolbar buttons
   // while it's being tested. See MarkdownEditor's `pasteRich`.
@@ -82,6 +84,7 @@ export default function MarkdownCodeEditor({
   onChange,
   onCursorLineChange,
   lineWrap = true,
+  spellcheck = true,
   onPasteRich,
 }: MarkdownCodeEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null)
@@ -99,6 +102,7 @@ export default function MarkdownCodeEditor({
   const designMode = useDesignModeStore((state) => state.mode)
   const [themeCompartment] = useState(() => new Compartment())
   const [lineWrapCompartment] = useState(() => new Compartment())
+  const [spellcheckCompartment] = useState(() => new Compartment())
 
   // Always use the latest onChange function
   useEffect(() => {
@@ -211,6 +215,7 @@ export default function MarkdownCodeEditor({
         themeCompartment.of(designMode === 'light' ? githubLight : oneDark),
         lineWrapCompartment.of(lineWrap ? wrapExtensions : noWrapExtensions),
         markdown(),
+        spellcheckCompartment.of(spellcheck ? spellcheckExtension : []),
         tabIndentUnit,
         search({
           top: true,
@@ -295,6 +300,11 @@ export default function MarkdownCodeEditor({
             lineHeight: '1.5',
           },
           '.cm-panels': {
+            // CodeMirror's base theme uses z-index 300, which put the sticky
+            // search panel above dialogs (z-50) like the Asset Manager (#1800).
+            // .cm-scroller is its own stacking context at z-index 0, so any
+            // positive value keeps the panel above the editor content.
+            zIndex: 10,
             backgroundColor: 'hsl(var(--surface))',
             color: 'hsl(var(--interface-text))',
           },
@@ -392,6 +402,16 @@ export default function MarkdownCodeEditor({
       ),
     })
   }, [lineWrap, lineWrapCompartment])
+
+  useEffect(() => {
+    const view = viewRef.current
+    if (!view) return
+    view.dispatch({
+      effects: spellcheckCompartment.reconfigure(
+        spellcheck ? spellcheckExtension : [],
+      ),
+    })
+  }, [spellcheck, spellcheckCompartment])
 
   return <div ref={editorRef} className="markdown-code-editor" />
 }

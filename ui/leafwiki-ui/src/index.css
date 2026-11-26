@@ -1434,12 +1434,36 @@
     @apply px-0 py-1;
   }
 
+  .search__input-row {
+    @apply mt-3 flex items-center gap-1;
+  }
+
   .search__input-wrapper {
-    @apply relative mt-3;
+    @apply relative flex-1;
+  }
+
+  .search__help-panel {
+    @apply border-surface-border bg-surface text-interface-text mt-2 rounded-md border px-3 py-2 text-xs outline-none;
+  }
+
+  .search__help-title {
+    @apply mb-1 font-semibold;
+  }
+
+  .search__help-list {
+    @apply flex flex-col gap-1;
+  }
+
+  .search__help-row code {
+    @apply font-mono font-semibold;
+  }
+
+  .search__min-length-hint {
+    @apply text-muted mb-1 text-sm empty:mb-0;
   }
 
   .search__input {
-    @apply border-surface-border bg-surface text-interface-text w-full rounded-md border px-2 py-1 pr-8 text-sm;
+    @apply border-surface-border bg-surface text-interface-text w-full rounded-md border px-2 py-1 text-sm;
   }
 
   .search__clear-button {
@@ -1546,8 +1570,9 @@
     @apply text-brand-dark font-semibold;
   }
 
-  .page-viewer__content mark.search-query-highlight {
-    @apply bg-brand/25 rounded-sm px-0.5 text-inherit;
+  /* lib/scrollToSearchQuery.ts; --brand follows light and dark mode. */
+  ::highlight(leafwiki-search-query) {
+    @apply bg-brand/25;
   }
 
   .page-refactor-dialog__results-view {
@@ -2390,6 +2415,30 @@
       margin-inline: auto;
     }
 
+    /* Admin page width "wide" (Settings > Display, PageViewer.tsx sets
+       data-content-width on .page-viewer, its subheader and metadata bar):
+       lifts the 680px reading column in the page view only, back to the
+       layout before #1696 — content, prose, backlinks and the header rows
+       use .page-viewer's full max-w-5xl width with its px-4/sm:px-8 gutters,
+       so their edges line up. Editor and history previews keep 680px.
+       A new width gets its own [data-content-width] block here. */
+    .page-viewer[data-content-width='wide'] .page-viewer__content,
+    .page-viewer[data-content-width='wide']
+      .page-viewer__body
+      > .backlinks__pane,
+    .page-viewer[data-content-width='wide']
+      .page-viewer__content
+      :where(p, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, dl) {
+      max-inline-size: none;
+    }
+
+    .page-viewer__subheader[data-content-width='wide']
+      .page-viewer__subheader-inner,
+    .page-viewer__metadata-bar[data-content-width='wide']
+      .page-viewer__metadata-bar-inner {
+      @apply w-full max-w-5xl px-4 sm:px-8;
+    }
+
     .page-viewer__metadata-bar .page-metadata__properties {
       min-inline-size: 0;
     }
@@ -3080,12 +3129,18 @@
     @apply w-full flex-1 overflow-hidden;
   }
 
+  /* Flex so a section's subpage count stays visible after the title
+     while the title truncates first. */
   .tree-node__link {
-    @apply w-full py-2;
+    @apply flex w-full min-w-0 items-baseline gap-1.5 py-2;
   }
 
   .tree-node__title {
-    @apply text-interface-text block truncate overflow-hidden text-sm text-ellipsis;
+    @apply text-interface-text block min-w-0 truncate overflow-hidden text-sm text-ellipsis;
+  }
+
+  .tree-node__link .subpage-count {
+    @apply ml-0;
   }
 
   .tree-node__title--active {
@@ -3519,6 +3574,12 @@
 
   .child-list__section li a {
     @apply text-interface-text! hover:underline!;
+  }
+
+  /* Number of direct subpages after a section title (SubpageCount).
+     inline-block keeps the link's hover underline off the number. */
+  .subpage-count {
+    @apply text-muted-foreground ml-1.5 inline-block shrink-0 text-xs font-normal tabular-nums;
   }
 
   /* ─── Page Metadata (tags + properties in PageViewer) ─────────────────────── */

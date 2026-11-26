@@ -1,5 +1,4 @@
 {
-  "account locked": "Zu viele fehlgeschlagene Anmeldeversuche. Bitte versuchen Sie es in 15 Minuten erneut.",
   "admin user cannot be deleted": "Der Administrator-Benutzer kann nicht gelöscht werden",
   "api key not found": "API-Schlüssel nicht gefunden",
   "api key request failed": "API-Schlüssel-Anfrage fehlgeschlagen",
@@ -13,10 +12,12 @@
   "authentication is disabled": "Die Authentifizierung ist deaktiviert",
   "authentication request failed": "Authentifizierungsanfrage fehlgeschlagen",
   "avatar file too large": "Avatar-Datei zu groß",
+  "avatar image is %sx%s pixels (allowed: up to %s pixels in total)": "Avatarbild hat %sx%s Pixel (erlaubt: insgesamt höchstens %s Pixel)",
   "avatar request failed": "Avatar-Anfrage fehlgeschlagen",
   "failed to decode avatar image": "Avatarbild konnte nicht decodiert werden",
   "failed to delete avatar": "Avatar konnte nicht gelöscht werden",
   "failed to encode avatar image": "Avatarbild konnte nicht encodiert werden",
+  "failed to persist toc-display config": "Die Einstellung für das Inhaltsverzeichnis konnte nicht gespeichert werden",
   "failed to save avatar file": "Avatar-Datei konnte nicht gespeichert werden",
   "invalid avatar file type %s (allowed: %s)": "Ungültiger Avatar-Dateityp %s (erlaubt: %s)",
   "invalid user id for avatar delete": "Ungültige Avatar-Anfrage",
@@ -99,6 +100,7 @@
   "a sync is already in progress": "Es läuft bereits eine Synchronisierung",
   "resync request failed": "Resync-Anfrage fehlgeschlagen",
   "search is currently unavailable": "Die Suche ist derzeit nicht verfügbar",
+  "search query is too long: at most %s characters and %s terms": "Die Suchanfrage ist zu lang: höchstens %s Zeichen und %s Begriffe",
   "title query param is required": "Der Titel-Abfrageparameter ist erforderlich",
   "TOTP is already enabled for this account": "Die Zwei-Faktor-Authentifizierung ist bereits aktiviert",
   "TOTP is not enabled for this account": "Die Zwei-Faktor-Authentifizierung ist nicht aktiviert",
@@ -109,5 +111,8 @@
   "user not found": "Benutzer nicht gefunden",
   "zip entry exceeds the per-file size limit": "Eine Datei im hochgeladenen Archiv ist zu groß",
   "decompressed zip contents exceed the total size limit": "Das hochgeladene Archiv ist nach dem Entpacken zu groß",
-  "zip entry's decompression ratio exceeds the allowed maximum": "Das hochgeladene Archiv sieht wie eine Dekompressionsbombe aus"
+  "zip entry's decompression ratio exceeds the allowed maximum": "Das hochgeladene Archiv sieht wie eine Dekompressionsbombe aus",
+  "invalid page content width": "Ungültige Seitenbreite",
+  "failed to update page display setting": "Darstellungseinstellung konnte nicht geändert werden",
+  "zip archive contains more entries than allowed": "Das hochgeladene Archiv enthält zu viele Dateien"
 }

@@ -1,8 +1,11 @@
 import { act, render, screen, fireEvent } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useTocPanelStore } from '@/stores/tocPanel'
+import type { PageAttachment } from '@/lib/api/assets'
 import { TocSidePanel } from './TocSidePanel'
+import { downloadsSection } from './pagePanelSectionFixtures'
 import type { TocEntry } from './extractTocEntries'
+import { useHeadingsSection } from './useHeadingsSection'
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -30,6 +33,18 @@ const entries: TocEntry[] = [
   { level: 3, text: 'Details', id: 'details' },
 ]
 
+// Composes the sections the way PageViewer does: headings, then attachments.
+function Panel({
+  entries,
+  downloads = [],
+}: {
+  entries: TocEntry[]
+  downloads?: PageAttachment[]
+}) {
+  const headings = useHeadingsSection(entries)
+  return <TocSidePanel sections={[headings, downloadsSection(downloads)]} />
+}
+
 // Helpers to add heading elements with controlled rect positions
 function addHeading(id: string, top: number): HTMLElement {
   const el = document.createElement('h2')
@@ -37,6 +52,13 @@ function addHeading(id: string, top: number): HTMLElement {
   vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({ top } as DOMRect)
   document.body.appendChild(el)
   return el
+}
+
+function expectActive(testId: string, active: boolean) {
+  const { classList } = screen.getByTestId(testId)
+  expect(classList.contains('page-viewer__toc-panel-entry--active')).toBe(
+    active,
+  )
 }
 
 let scrollContainer: HTMLDivElement
@@ -60,26 +82,26 @@ afterEach(() => {
 
 describe('TocSidePanel — rendering', () => {
   it('renders the "On this page" title', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
     expect(screen.getByText('On this page')).toBeInTheDocument()
   })
 
   it('renders all entry texts', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
     expect(screen.getByText('Introduction')).toBeInTheDocument()
     expect(screen.getByText('Background')).toBeInTheDocument()
     expect(screen.getByText('Details')).toBeInTheDocument()
   })
 
   it('renders data-testid on each entry button', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
     expect(screen.getByTestId('toc-entry-introduction')).toBeInTheDocument()
     expect(screen.getByTestId('toc-entry-background')).toBeInTheDocument()
     expect(screen.getByTestId('toc-entry-details')).toBeInTheDocument()
   })
 
   it('has nav with correct aria-label', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
     expect(screen.getByRole('navigation')).toHaveAttribute(
       'aria-label',
       'Table of contents',
@@ -87,7 +109,7 @@ describe('TocSidePanel — rendering', () => {
   })
 
   it('sets the full entry text as a title attribute for hover tooltips', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
     expect(screen.getByTestId('toc-entry-background')).toHaveAttribute(
       'title',
       'Background',
@@ -96,14 +118,14 @@ describe('TocSidePanel — rendering', () => {
 
   it('does not register scroll listener when entries is empty', () => {
     const spy = vi.spyOn(scrollContainer, 'addEventListener')
-    render(<TocSidePanel entries={[]} />)
+    render(<Panel entries={[]} />)
     expect(spy).not.toHaveBeenCalled()
   })
 })
 
 describe('TocSidePanel — click navigation', () => {
   it('calls scrollToHeadlineHash with encoded id when entry is clicked', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
     fireEvent.click(screen.getByTestId('toc-entry-background'))
     expect(scrollMock).toHaveBeenCalledWith('#background', {
       waitForStableLayout: false,
@@ -114,7 +136,7 @@ describe('TocSidePanel — click navigation', () => {
     const specialEntries: TocEntry[] = [
       { level: 1, text: 'Hello World', id: 'hello world' },
     ]
-    render(<TocSidePanel entries={specialEntries} />)
+    render(<Panel entries={specialEntries} />)
     fireEvent.click(screen.getByTestId('toc-entry-hello world'))
     expect(scrollMock).toHaveBeenCalledWith(
       `#${encodeURIComponent('hello world')}`,
@@ -123,16 +145,45 @@ describe('TocSidePanel — click navigation', () => {
   })
 })
 
+describe('TocSidePanel — non-clickable entries', () => {
+  it('renders an entry without onSelect as plain text, not a focusable button', () => {
+    render(
+      <TocSidePanel
+        sections={[
+          {
+            id: 'headings',
+            titleKey: 'toc.onThisPage',
+            items: [
+              {
+                kind: 'anchor',
+                key: 'introduction',
+                label: 'Introduction',
+                active: true,
+                testId: 'entry-introduction',
+              },
+            ],
+          },
+        ]}
+      />,
+    )
+
+    const entry = screen.getByTestId('toc-entry-introduction')
+    expect(entry.tagName).toBe('SPAN')
+    expect(entry).not.toHaveAttribute('tabindex')
+    expect(entry.className).toMatch(/cursor-default/)
+    expect(entry.className).toMatch(/page-viewer__toc-panel-entry--active/)
+    expect(screen.queryByRole('button', { name: 'Introduction' })).toBeNull()
+  })
+})
+
 describe('TocSidePanel — scroll spy', () => {
   it('defaults to first entry as active on mount', () => {
     // All headings below triggerY (0 + 120 = 120)
     entries.forEach(({ id }) => addHeading(id, 300))
 
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
-    expect(screen.getByTestId('toc-entry-introduction').className).toMatch(
-      /page-viewer__toc-panel-entry--active/,
-    )
+    expectActive('toc-entry-introduction', true)
   })
 
   it('activates heading whose top has passed triggerY on mount', () => {
@@ -140,11 +191,9 @@ describe('TocSidePanel — scroll spy', () => {
     addHeading('background', 300)
     addHeading('details', 500)
 
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
-    expect(screen.getByTestId('toc-entry-introduction').className).toMatch(
-      /page-viewer__toc-panel-entry--active/,
-    )
+    expectActive('toc-entry-introduction', true)
   })
 
   it('updates active heading when scrolling', () => {
@@ -152,7 +201,7 @@ describe('TocSidePanel — scroll spy', () => {
     const bgEl = addHeading('background', 300)
     addHeading('details', 600)
 
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
     // Scroll: background now also past trigger
     vi.spyOn(introEl, 'getBoundingClientRect').mockReturnValue({
@@ -166,9 +215,7 @@ describe('TocSidePanel — scroll spy', () => {
       scrollContainer.dispatchEvent(new Event('scroll'))
     })
 
-    expect(screen.getByTestId('toc-entry-background').className).toMatch(
-      /page-viewer__toc-panel-entry--active/,
-    )
+    expectActive('toc-entry-background', true)
   })
 
   it('picks the deepest heading past triggerY (last one in document order)', () => {
@@ -176,14 +223,10 @@ describe('TocSidePanel — scroll spy', () => {
     addHeading('background', 50) // both past trigger → background wins
     addHeading('details', 300)
 
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
-    expect(screen.getByTestId('toc-entry-background').className).toMatch(
-      /page-viewer__toc-panel-entry--active/,
-    )
-    expect(screen.getByTestId('toc-entry-introduction').className).not.toMatch(
-      /page-viewer__toc-panel-entry--active/,
-    )
+    expectActive('toc-entry-background', true)
+    expectActive('toc-entry-introduction', false)
   })
 
   it('activates last visible heading when scroll is at the bottom', () => {
@@ -214,17 +257,15 @@ describe('TocSidePanel — scroll spy', () => {
     addHeading('background', 40) // 40 < bottom(100) → visible at bottom → active
     addHeading('details', 70) // 70 < bottom(100) → visible, wins as last
 
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
-    expect(screen.getByTestId('toc-entry-details').className).toMatch(
-      /page-viewer__toc-panel-entry--active/,
-    )
+    expectActive('toc-entry-details', true)
   })
 
   it('removes scroll listener on unmount', () => {
     entries.forEach(({ id }) => addHeading(id, 300))
     const removeSpy = vi.spyOn(scrollContainer, 'removeEventListener')
-    const { unmount } = render(<TocSidePanel entries={entries} />)
+    const { unmount } = render(<Panel entries={entries} />)
     unmount()
     expect(removeSpy).toHaveBeenCalledWith('scroll', expect.any(Function))
   })
@@ -232,7 +273,7 @@ describe('TocSidePanel — scroll spy', () => {
 
 describe('TocSidePanel — collapse/expand', () => {
   it('collapses the panel when the collapse button is clicked', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
     // Single, always-mounted toggle button — its testid/label swap with state
     // instead of a separate collapse/expand element, so its position never
@@ -253,7 +294,7 @@ describe('TocSidePanel — collapse/expand', () => {
 
   it('expands the panel again when the expand button is clicked', () => {
     useTocPanelStore.setState({ collapsed: true })
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
     fireEvent.click(screen.getByTestId('toc-side-panel-expand'))
 
@@ -270,7 +311,7 @@ describe('TocSidePanel — collapse/expand', () => {
 
   it('renders collapsed when the store starts out collapsed', () => {
     useTocPanelStore.setState({ collapsed: true })
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
     expect(screen.getByTestId('toc-side-panel-expand')).toBeInTheDocument()
     expect(screen.getByTestId('toc-side-panel-list')).toHaveAttribute(
@@ -280,7 +321,7 @@ describe('TocSidePanel — collapse/expand', () => {
   })
 
   it('toggles the --collapsed modifier class on the nav element', () => {
-    render(<TocSidePanel entries={entries} />)
+    render(<Panel entries={entries} />)
 
     // Drives the border-color fade here; AppLayout applies the matching
     // modifier to .app-layout__toc-pane to shrink its width (see index.css).
@@ -299,7 +340,7 @@ describe('TocSidePanel — collapse/expand', () => {
 describe('TocSidePanel — downloads', () => {
   it('lists non-image files below the TOC', () => {
     render(
-      <TocSidePanel
+      <Panel
         entries={entries}
         downloads={[{ name: 'notes.pdf', url: '/assets/p1/notes.pdf' }]}
       />,
@@ -313,7 +354,7 @@ describe('TocSidePanel — downloads', () => {
 
   it('shows the downloads title when there are attachments but no headings', () => {
     render(
-      <TocSidePanel
+      <Panel
         entries={[]}
         downloads={[{ name: 'notes.pdf', url: '/assets/p1/notes.pdf' }]}
       />,
@@ -323,7 +364,65 @@ describe('TocSidePanel — downloads', () => {
   })
 
   it('falls back to the "on this page" title when there are neither headings nor attachments', () => {
-    render(<TocSidePanel entries={[]} downloads={[]} />)
+    render(<Panel entries={[]} downloads={[]} />)
     expect(screen.getByText('On this page')).toBeInTheDocument()
+  })
+})
+
+describe('TocSidePanel — keyboard reachability', () => {
+  const downloads = [{ name: 'notes.pdf', url: '/assets/p1/notes.pdf' }]
+
+  it.each([
+    { name: 'expanded', collapsed: false, want: '0' },
+    { name: 'collapsed', collapsed: true, want: '-1' },
+  ])(
+    'gives headings and downloads tabIndex $want when $name',
+    ({ collapsed, want }) => {
+      useTocPanelStore.setState({ collapsed })
+      render(<Panel entries={entries} downloads={downloads} />)
+      for (const testId of [
+        'toc-entry-introduction',
+        'toc-download-notes.pdf',
+      ]) {
+        expect(screen.getByTestId(testId)).toHaveAttribute('tabindex', want)
+      }
+    },
+  )
+})
+
+describe('TocSidePanel — section order and file names', () => {
+  it('lists the headings, then the attachments header, then the downloads', () => {
+    render(
+      <Panel
+        entries={entries}
+        downloads={[{ name: 'notes.pdf', url: '/assets/p1/notes.pdf' }]}
+      />,
+    )
+    const rows = screen
+      .getByTestId('toc-side-panel-list')
+      .querySelectorAll(':scope > li')
+    expect(Array.from(rows, (li) => li.textContent)).toEqual([
+      'Introduction',
+      'Background',
+      'Details',
+      'Attached Media',
+      'notes.pdf',
+    ])
+  })
+
+  it.each([
+    { name: 'unicode and spaces', file: 'Bericht über Ä 日本 (1).pdf' },
+    { name: 'quotes and ampersand', file: `a "b" & 'c'.txt` },
+  ])('keeps the file name as-is in the link: $name', ({ file }) => {
+    render(
+      <Panel
+        entries={[]}
+        downloads={[{ name: file, url: `/assets/p1/${file}` }]}
+      />,
+    )
+    const link = screen.getByTestId(`toc-download-${file}`)
+    expect(link).toHaveAttribute('download', file)
+    expect(link).toHaveAttribute('title', file)
+    expect(link).toHaveTextContent(file)
   })
 })

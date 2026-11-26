@@ -78,7 +78,7 @@ func (r *Routes) handleCreatePlan(c *gin.Context) {
 	}
 
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, importMaxUploadSize)
-	if err := c.Request.ParseMultipartForm(importMaxUploadSize); err != nil {
+	if err := c.Request.ParseMultipartForm(httpinternal.MultipartMaxMemory); err != nil {
 		respondWithImporterStatusError(c, http.StatusRequestEntityTooLarge, ErrCodeImporterUploadTooLarge, "Upload exceeds maximum size limit of 500 MiB", "upload exceeds maximum size limit")
 		return
 	}
@@ -122,7 +122,7 @@ func logRejectedZipExtraction(log *slog.Logger, err error) {
 		return
 	}
 	switch loc.Code {
-	case ErrCodeImporterZipEntryTooLarge, ErrCodeImporterZipExtractedTooLarge, ErrCodeImporterZipRatioTooHigh:
+	case ErrCodeImporterZipEntryTooLarge, ErrCodeImporterZipExtractedTooLarge, ErrCodeImporterZipRatioTooHigh, ErrCodeImporterZipTooManyEntries:
 		log.Warn("rejected import upload: zip extraction limit exceeded", "code", loc.Code, "error", loc.Cause)
 	}
 }

@@ -24,7 +24,10 @@ var reservedSlugs = map[string]bool{
 	"settings": true,
 }
 
-var slugPattern = regexp.MustCompile(`^[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*$`)
+// defaultSlug is used when a title yields no usable characters.
+const defaultSlug = "page"
+
+var slugPattern = regexp.MustCompile(`^[a-zA-Z0-9_]+(-[a-zA-Z0-9_]+)*$`)
 
 type SlugService struct {
 }
@@ -37,6 +40,12 @@ func NewSlugService() *SlugService {
 // Use this when creating or renaming a page in the actual tree, where sibling collisions matter.
 func (s *SlugService) GenerateUniqueChildSlug(parent *PageNode, currentID, desired string) string {
 	slug := normalizeSlug(desired)
+	if slug == "" {
+		// A title made only of symbols (e.g. a lone emoji while typing) normalizes to "".
+		// Suffixing "" gives "-1", "-2"… which never pass IsValidSlug: the loop below
+		// would spin forever and pin a CPU core per request.
+		slug = defaultSlug
+	}
 	original := slug
 	i := 1
 
@@ -52,7 +61,7 @@ func (s *SlugService) GenerateUniqueChildSlug(parent *PageNode, currentID, desir
 // Rules:
 // - Must not be empty
 // - Must not be a reserved slug (case-insensitive)
-// - Must contain only letters, numbers and hyphens
+// - Must contain only letters, numbers, hyphens and underscores
 // - Must not start or end with a hyphen
 func (s *SlugService) IsValidSlug(slug string) error {
 	if slug == "" {
@@ -66,7 +75,7 @@ func (s *SlugService) IsValidSlug(slug string) error {
 	}
 
 	if !slugPattern.MatchString(slug) {
-		return errors.New("slug must contain only letters, numbers and hyphens")
+		return errors.New("slug must contain only letters, numbers, hyphens and underscores")
 	}
 
 	if strings.HasPrefix(slug, "-") || strings.HasSuffix(slug, "-") {
@@ -97,7 +106,7 @@ func (s *SlugService) GenerateValidSlug(desired string) string {
 
 // normalizeSlug creates a URL-friendly slug (can be improved)
 func normalizeSlug(title string) string {
-	return slug.Make(strings.ReplaceAll(title, "_", "-"))
+	return slug.Make(title)
 }
 
 // Checks if the given slug already exists among parent's children

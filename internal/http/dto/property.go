@@ -20,6 +20,16 @@ type PropertyKeyCount struct {
 	Count int    `json:"count"`
 }
 
+// ToPropertyKeyCounts converts key counts from the property index; nil
+// becomes an empty slice so the response is [] rather than null.
+func ToPropertyKeyCounts(in []coreprop.PropertyKeyCount) []PropertyKeyCount {
+	out := make([]PropertyKeyCount, len(in))
+	for i, kc := range in {
+		out[i] = PropertyKeyCount{Key: kc.Key, Count: kc.Count}
+	}
+	return out
+}
+
 // PropertyPage is the reduced page DTO returned by the property filter endpoint.
 type PropertyPage struct {
 	ID           string                   `json:"id"`
@@ -30,7 +40,7 @@ type PropertyPage struct {
 	UpdatedAt    string                   `json:"updatedAt,omitempty"`
 	CreatorID    string                   `json:"creatorId,omitempty"`
 	LastAuthorID string                   `json:"lastAuthorId,omitempty"`
-	LastAuthor   *auth.UserLabel          `json:"lastAuthor,omitempty"`
+	LastAuthor   *UserLabel               `json:"lastAuthor,omitempty"`
 }
 
 // ToPropertyPage builds a PropertyPage from a PageNode, its properties, and an optional user resolver.
@@ -56,9 +66,7 @@ func ToPropertyPage(node *tree.PageNode, props map[string]coreprop.PropertyEntry
 		p.UpdatedAt = node.Metadata.UpdatedAt.Format(time.RFC3339)
 	}
 
-	if userResolver != nil {
-		p.LastAuthor, _ = userResolver.ResolveUserLabel(node.Metadata.LastAuthorID)
-	}
+	p.LastAuthor = ResolveUserLabel(userResolver, node.Metadata.LastAuthorID)
 
 	return p
 }

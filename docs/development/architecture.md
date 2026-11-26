@@ -39,7 +39,7 @@ cmd/leafwiki  →  internal/wiki (composition root)  →  internal/wiki/<domain>
   resolution), `excerpt`, `shared` (the `sharederrors.LocalizedError` convention lives here),
   `treemigration`, `tools`. Plus sibling top-level packages at the same layer: `internal/search`,
   `internal/links`, `internal/tags`, `internal/properties`, `internal/favorites`,
-  `internal/usersettings`, `internal/avatar`, `internal/publicaccess`, `internal/tocdisplay`,
+  `internal/usersettings`, `internal/avatar`, `internal/publicaccess`, `internal/pagedisplay`,
   `internal/branding`, `internal/importer`, `internal/backup`, `internal/snapshot`,
   `internal/restore`.
 
@@ -80,7 +80,10 @@ This is currently a mix of synchronous work (tree, links, tags/properties all bl
 returning) and one asynchronous exception (search runs its full reindex in a background goroutine).
 That asymmetry, and the fact that *all* of these rebuild unconditionally on every boot
 regardless of whether the on-disk indexes already match, is a known optimization target: boot
-could skip the rebuild when the persisted indexes are trustworthy.
+could skip the rebuild when the persisted indexes are trustworthy. `search.db` already keeps its
+tables across restarts and is only rebuilt when its schema version or DDL doesn't match the
+binary or the file is corrupt ([ADR-0022](./adr/0022-versioned-derived-search-index.md)); the boot reindex still
+clears and refills it.
 
 `Wiki.Close()` (`wiki.go`) cancels the shutdown context and drains in-flight reload goroutines
 (`reloadWG`) first, then closes the stores (auth, users, API keys, email tokens, links, user
@@ -143,7 +146,8 @@ except from a backup — there's no filesystem walk that can regenerate a lost p
 revoked-but-still-listed API key.
 
 The "corruption policy" column says what a store's constructor does when SQLite reports
-`SQLITE_IOERR`, `SQLITE_CORRUPT` or `SQLITE_NOTADB` ([ADR-0013](./adr/0013-per-store-sqlite-corruption-policy.md)):
+`SQLITE_IOERR`, `SQLITE_CORRUPT` or `SQLITE_NOTADB`, or the store itself reports
+`sqliteutil.ErrUnusableDatabase` ([ADR-0013](./adr/0013-per-store-sqlite-corruption-policy.md)):
 `RebuildOnCorruption` deletes the file and its sidecars and starts empty (the next resync fills
 it); `QuarantineOnCorruption` renames the file and its sidecars to
 `<name>.corrupt-<UTC timestamp>`, logs an `Error` and starts empty; `FailOnCorruption` leaves the
@@ -211,30 +215,58 @@ remarkMath, remarkGfm, remarkFlexibleMarkers, remarkImageSize
 → rehypeRaw               (parses embedded HTML strings into hast nodes)
 → rehypeLineNumber, rehypeCodeFenceLineNumbers
 → rehypeWhitelistStyles   (filters inline `style` to a property whitelist)
-→ rehypeKatex
 → rehypeSanitize          (custom schema in previewSanitizeSchema.ts, sanitizes the WHOLE tree incl. rehypeRaw's output)
+→ rehypeKatex             (renders math from its TeX source, trust off)
 → rehypeHighlight
 ```
 
 `MarkdownLink` renders absolute HTTP(S) and protocol-relative links as ordinary anchors,
 preserving the complete URL. Links to the browser's current origin open in the current tab;
 external web links open in a new tab with `noopener noreferrer`. Relative wiki links keep
-client-side navigation and page lookup; relative asset links keep opening in a new tab.
+client-side navigation and page lookup; the lookup uses the bare path, while the rendered
+link keeps the query and fragment (so `[x](page#heading)` lands on the heading). Relative
+asset links keep opening in a new tab.
 
 Key facts:
 
 - Between `rehypeRaw` and `rehypeWhitelistStyles`, `rehypeLineNumber` and
   `rehypeCodeFenceLineNumbers` add source-line data attributes (used for editor ↔ preview scroll
   sync); `remarkImageSize` handles image size syntax.
+- The schema drops `name` on `img`: the browser exposes an `img` as a property of `document` under
+  its name, and under its id once it has a name, so `<img name="cookie">` or
+  `<img id="cookie" name="x">` would replace `document.cookie`. `img` is the only allowed tag with
+  that behaviour (`form`, `iframe`, `embed`, `object` are not allowed); `a`, `details` and `input`
+  keep `name`. Ids stay unprefixed, so heading and footnote anchors keep their classic `#intro`
+  form (#869).
 - `rehypeRaw` doesn't inject a raw string into the DOM — it parses via `hast-util-raw`/`parse5`,
   the same spec-compliant HTML5 tree-construction algorithm browsers use. Unclosed tags get
   auto-closed exactly like a browser would; the result is always a well-formed tree. No
   `dangerouslySetInnerHTML` anywhere in the frontend.
+- Author HTML can't pick class names: the page shares the app's stylesheet, so a free `class`
+  would reach Tailwind utilities such as `fixed inset-0 z-50`. The schema allows class names
+  only per element and only those the markdown plugins emit before sanitizing (task lists,
+  footnotes, `language-*` on `code`, `flexible-marker*` on `mark`) or `normalizeMarkdownBlocks`
+  writes into the source (`markdown-collapsible` on `details`). Classes added by React
+  components after sanitizing (callouts, code blocks, headline anchors) are not affected.
 - Sanitize order is correct: `rehypeSanitize` runs *after* `rehypeRaw`, so raw HTML is never left
   unsanitized (this is the safe order — reversed, it would be an XSS hole).
+- `rehypeKatex` and `rehypeHighlight` run *after* `rehypeSanitize`. They generate markup from
+  text (TeX source, code), not from author HTML, so the schema never has to allow their class
+  names or KaTeX's SVG. KaTeX keeps `trust` off, which refuses `\htmlClass`, `\htmlStyle`,
+  `\href`, `\includegraphics` and similar commands; `MarkdownPreview.test.tsx` pins that.
 - `rehypeWhitelistStyles.ts` allows layout/typography properties (margin, padding, width/height,
   color, border, display, …) but **not** `position`, `z-index`, or `top/left/right/bottom` — so
   inline styles can't be used to escape the content container via `position: fixed` etc.
+- Mermaid diagrams don't go through this pipeline: `useMermaidInjector.ts` inserts the SVG from
+  `mermaid.render`, whose HTML labels mermaid runs through DOMPurify (`securityLevel:
+  'antiscript'` plus `labelSanitizeConfig`). Labels may format text and link, but form controls,
+  dialogs, popovers, `<style>`, `iframe`, inline `style` and `class` are dropped.
+- Rendered content keeps its ids, so it can carry any id the app uses. `document.getElementById`
+  returns the first match in document order, so an app element after the article (the TOC pane,
+  the Mermaid sandbox) must not be found by id: `AppLayout` hands its portal targets to pages
+  through `stores/layoutPortals.ts`, and `MarkdownPreview` passes its sandbox as a ref. The
+  remaining id lookups (`scroll-container`, `root`) are safe only because those elements are
+  ancestors of the article and therefore come first.
 - Both render targets wrap content in scoped containers (`.page-viewer__content`,
   `.markdown-editor__preview`, both `prose`-classed). Since parse5 guarantees proper nesting, a
   malformed tag can mis-render *within* that container's own subtree (wrong nesting, a box
@@ -242,5 +274,7 @@ Key facts:
   header, or other pages.
 
 **Worth a periodic audit:** the custom `rehypeSanitize` schema extends `defaultSchema` to allow
-`style`, `class`, `audio`/`video` `src`, and custom `wikilink-*` protocols. Check that these additions don't reopen a CSS-injection or protocol-based vector when the
-schema changes.
+`style`, per-element class names, `audio`/`video` `src`, and custom `wikilink-*` protocols.
+Check that these additions don't reopen a CSS-injection or protocol-based vector when the
+schema changes; a plugin that starts emitting a new class before sanitizing needs its own
+allowlist entry.

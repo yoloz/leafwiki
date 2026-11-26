@@ -1,6 +1,10 @@
 package pagesave
 
 import (
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/perber/wiki/internal/core/tree"
@@ -64,7 +68,7 @@ func TestSearchIndexSideEffect_IndexAllPages_IndexesExistingPages(t *testing.T) 
 		t.Fatalf("IndexAllPages: %v", err)
 	}
 
-	result, err := index.Search("uniquecontent", nil, 0, 10)
+	result, err := index.Search(t.Context(), "uniquecontent", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -88,7 +92,7 @@ func TestSearchIndexSideEffect_IndexAllPages_ClearsStaleEntries(t *testing.T) {
 		t.Fatalf("IndexAllPages: %v", err)
 	}
 
-	result, err := index.Search("ghostpage", nil, 0, 10)
+	result, err := index.Search(t.Context(), "ghostpage", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -104,7 +108,7 @@ func TestSearchIndexSideEffect_IndexAllPages_EmptyTree(t *testing.T) {
 		t.Fatalf("expected no error on empty tree, got: %v", err)
 	}
 
-	result, err := index.Search("anything", nil, 0, 10)
+	result, err := index.Search(t.Context(), "anything", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -125,7 +129,7 @@ func TestSearchIndexSideEffect_Apply_Create_IndexesPage(t *testing.T) {
 		After:     page,
 	})
 
-	result, err := index.Search("uniqueterm_create", nil, 0, 10)
+	result, err := index.Search(t.Context(), "uniqueterm_create", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -146,7 +150,7 @@ func TestSearchIndexSideEffect_Apply_Update_ReplacesContentAfterBootstrap(t *tes
 		t.Fatalf("IndexAllPages: %v", err)
 	}
 
-	before, err := index.Search("uniqueword_before", nil, 0, 10)
+	before, err := index.Search(t.Context(), "uniqueword_before", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search (before): %v", err)
 	}
@@ -168,7 +172,7 @@ func TestSearchIndexSideEffect_Apply_Update_ReplacesContentAfterBootstrap(t *tes
 		After:     updated,
 	})
 
-	stale, err := index.Search("uniqueword_before", nil, 0, 10)
+	stale, err := index.Search(t.Context(), "uniqueword_before", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search (stale): %v", err)
 	}
@@ -176,7 +180,7 @@ func TestSearchIndexSideEffect_Apply_Update_ReplacesContentAfterBootstrap(t *tes
 		t.Errorf("expected old content to be replaced, but 'uniqueword_before' still found")
 	}
 
-	fresh, err := index.Search("uniqueword_after", nil, 0, 10)
+	fresh, err := index.Search(t.Context(), "uniqueword_after", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search (fresh): %v", err)
 	}
@@ -194,7 +198,7 @@ func TestSearchIndexSideEffect_Apply_Delete_RemovesFromIndex(t *testing.T) {
 		t.Fatalf("IndexAllPages: %v", err)
 	}
 
-	before, err := index.Search("uniqueterm_delete", nil, 0, 10)
+	before, err := index.Search(t.Context(), "uniqueterm_delete", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search (before): %v", err)
 	}
@@ -207,7 +211,7 @@ func TestSearchIndexSideEffect_Apply_Delete_RemovesFromIndex(t *testing.T) {
 		AffectedPages: []*tree.Page{page},
 	})
 
-	after, err := index.Search("uniqueterm_delete", nil, 0, 10)
+	after, err := index.Search(t.Context(), "uniqueterm_delete", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search (after): %v", err)
 	}
@@ -253,7 +257,7 @@ func TestSearchIndexSideEffect_Apply_Delete_Recursive_RemovesAllPagesFromIndex(t
 	}
 
 	for _, term := range []string{"uniqueterm_parent", "uniqueterm_child1", "uniqueterm_child2"} {
-		r, err := index.Search(term, nil, 0, 10)
+		r, err := index.Search(t.Context(), term, nil, 0, 10)
 		if err != nil {
 			t.Fatalf("Search(%q) before delete: %v", term, err)
 		}
@@ -281,7 +285,7 @@ func TestSearchIndexSideEffect_Apply_Delete_Recursive_RemovesAllPagesFromIndex(t
 	})
 
 	for _, term := range []string{"uniqueterm_parent", "uniqueterm_child1", "uniqueterm_child2"} {
-		r, err := index.Search(term, nil, 0, 10)
+		r, err := index.Search(t.Context(), term, nil, 0, 10)
 		if err != nil {
 			t.Fatalf("Search(%q) after delete: %v", term, err)
 		}
@@ -321,7 +325,7 @@ func TestSearchIndexSideEffect_Apply_Move_PageStillSearchableAtNewPath(t *testin
 		AffectedPages: []*tree.Page{moved},
 	})
 
-	result, err := index.Search("uniqueterm_move", nil, 0, 10)
+	result, err := index.Search(t.Context(), "uniqueterm_move", nil, 0, 10)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
@@ -336,5 +340,160 @@ func TestSearchIndexSideEffect_Apply_Move_PageStillSearchableAtNewPath(t *testin
 	wantPath := "target/movable"
 	if result.Items[0].Path != wantPath {
 		t.Errorf("expected path %q after move, got %q", wantPath, result.Items[0].Path)
+	}
+}
+
+// Boot reopens search.db, which now keeps its rows (ADR-0022), and then runs
+// IndexAllPagesContext. Repeating that must not duplicate any page.
+func TestSearchIndexSideEffect_IndexAllPages_AfterReopenDoesNotDuplicateRows(t *testing.T) {
+	tmp := t.TempDir()
+	treeSvc := tree.NewTreeService(tmp)
+	if err := treeSvc.LoadTree(); err != nil {
+		t.Fatalf("LoadTree: %v", err)
+	}
+	createPageWithContent(t, treeSvc, "First", "first", "reopenterm one")
+	createPageWithContent(t, treeSvc, "Second", "second", "reopenterm two")
+
+	for boot := range 3 {
+		index, err := search.NewSQLiteIndex(tmp)
+		if err != nil {
+			t.Fatalf("boot %d: NewSQLiteIndex: %v", boot, err)
+		}
+		effect := NewSearchIndexSideEffect(index, treeSvc, nil, nil)
+		if err := effect.IndexAllPagesContext(t.Context()); err != nil {
+			t.Fatalf("boot %d: IndexAllPagesContext: %v", boot, err)
+		}
+		result, err := index.Search(t.Context(), "reopenterm", nil, 0, 10)
+		if err != nil {
+			t.Fatalf("boot %d: Search: %v", boot, err)
+		}
+		if result.Count != 2 {
+			t.Errorf("boot %d: Search count = %d, want 2", boot, result.Count)
+		}
+		if err := index.Close(); err != nil {
+			t.Fatalf("boot %d: Close: %v", boot, err)
+		}
+	}
+}
+
+// Boot reopens a search.db whose FTS5 shadow tables are damaged (open does
+// not see it, ADR-0022) and runs IndexAllPagesContext; afterwards Search must
+// work again with exactly the tree's pages.
+func TestSearchIndexSideEffect_IndexAllPages_HealsDamagedShadowTablesAfterReopen(t *testing.T) {
+	tests := []struct {
+		name   string
+		damage string
+	}{
+		{name: "inverted index with missing segments", damage: `DELETE FROM pages_data WHERE id > 10`},
+		{name: "missing content rows", damage: `DELETE FROM pages_content`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			treeSvc := tree.NewTreeService(tmp)
+			if err := treeSvc.LoadTree(); err != nil {
+				t.Fatalf("LoadTree: %v", err)
+			}
+			createPageWithContent(t, treeSvc, "First", "first", "healterm one")
+			createPageWithContent(t, treeSvc, "Second", "second", "healterm two")
+
+			index, err := search.NewSQLiteIndex(tmp)
+			if err != nil {
+				t.Fatalf("NewSQLiteIndex: %v", err)
+			}
+			if err := NewSearchIndexSideEffect(index, treeSvc, nil, nil).IndexAllPagesContext(t.Context()); err != nil {
+				t.Fatalf("IndexAllPagesContext: %v", err)
+			}
+			if err := index.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+
+			raw, err := sql.Open("sqlite", filepath.Join(tmp, "search.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := raw.Exec(tt.damage); err != nil {
+				t.Fatalf("damage: %v", err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			index, err = search.NewSQLiteIndex(tmp)
+			if err != nil {
+				t.Fatalf("reopen: %v", err)
+			}
+			defer func() {
+				if err := index.Close(); err != nil {
+					t.Errorf("Close: %v", err)
+				}
+			}()
+			if _, err := index.Search(t.Context(), "healterm", nil, 0, 10); err == nil {
+				t.Fatal("Search on the damaged index succeeded; the damage no longer reproduces")
+			}
+			if err := NewSearchIndexSideEffect(index, treeSvc, nil, nil).IndexAllPagesContext(t.Context()); err != nil {
+				t.Fatalf("IndexAllPagesContext on the damaged index: %v", err)
+			}
+			res, err := index.Search(t.Context(), "healterm", nil, 0, 10)
+			if err != nil {
+				t.Fatalf("Search after boot reindex: %v", err)
+			}
+			if res.Count != 2 {
+				t.Errorf("Search count = %d, want 2", res.Count)
+			}
+		})
+	}
+}
+
+// A resync (Clear plus full reindex) while searches run must never make a
+// Search fail, and never return more hits than there are pages.
+func TestSearchIndexSideEffect_IndexAllPages_ConcurrentSearchesDuringResyncDoNotFail(t *testing.T) {
+	treeSvc, index, effect := setupSearchTest(t)
+	for i := range 10 {
+		createPageWithContent(t, treeSvc, fmt.Sprintf("Page %d", i), fmt.Sprintf("page-%d", i), "resyncterm body")
+	}
+	if err := effect.IndexAllPages(); err != nil {
+		t.Fatalf("IndexAllPages: %v", err)
+	}
+
+	stop := make(chan struct{})
+	errCh := make(chan error, 100)
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				res, err := index.Search(t.Context(), "resyncterm", nil, 0, 50)
+				if err != nil {
+					errCh <- fmt.Errorf("Search: %w", err)
+					return
+				}
+				if res.Count > 10 {
+					errCh <- fmt.Errorf("Search count = %d, more than the 10 pages", res.Count)
+					return
+				}
+			}
+		}()
+	}
+	for range 3 {
+		if err := effect.IndexAllPagesContext(t.Context()); err != nil {
+			t.Errorf("IndexAllPagesContext: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Error(err)
+	}
+	res, err := index.Search(t.Context(), "resyncterm", nil, 0, 50)
+	if err != nil || res.Count != 10 {
+		t.Errorf("after resyncs: count=%v err=%v, want 10", res, err)
 	}
 }

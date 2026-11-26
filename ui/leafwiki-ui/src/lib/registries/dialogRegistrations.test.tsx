@@ -41,6 +41,7 @@ describe('application dialog registrations', () => {
       'link-insert',
       'restore-revision-confirmation',
       'wikilink-disambiguation',
+      'import-url', // local URL-import feature
     ])
   })
 

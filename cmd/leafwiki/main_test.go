@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -171,6 +173,101 @@ func TestValidateHTTPRemoteUserAutoCreateConfig(t *testing.T) {
 	}
 }
 
+// The messages are pinned: operators grep logs for them.
+func TestValidateSMTPConfig_FlagCombinations_ReturnPinnedErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		host      string
+		from      string
+		publicURL string
+		security  string
+		wantErr   string
+	}{
+		{name: "smtp off ignores everything else", publicURL: "not a url", security: "bogus"},
+		{name: "smtp off with a valid public url", publicURL: "https://wiki.example.com"},
+		{name: "complete https config", host: "smtp.example.com", from: "wiki@example.com", publicURL: "https://wiki.example.com", security: "starttls"},
+		{name: "http public url with path", host: "smtp.example.com", from: "wiki@example.com", publicURL: "http://wiki.example.com/wiki", security: "none"},
+		{name: "tls security", host: "smtp.example.com", from: "wiki@example.com", publicURL: "https://wiki.example.com", security: "tls"},
+		{name: "missing from", host: "smtp.example.com", publicURL: "https://wiki.example.com", security: "starttls", wantErr: "--smtp-from is required when --smtp-host is set"},
+		{name: "missing public url", host: "smtp.example.com", from: "wiki@example.com", security: "starttls", wantErr: "--public-url is required when --smtp-host is set"},
+		{name: "relative public url", host: "smtp.example.com", from: "wiki@example.com", publicURL: "/wiki", security: "starttls", wantErr: `--public-url must be an absolute http(s):// URL, got "/wiki"`},
+		{name: "ftp public url", host: "smtp.example.com", from: "wiki@example.com", publicURL: "ftp://wiki.example.com", security: "starttls", wantErr: `--public-url must be an absolute http(s):// URL, got "ftp://wiki.example.com"`},
+		{name: "public url without host", host: "smtp.example.com", from: "wiki@example.com", publicURL: "https://", security: "starttls", wantErr: `--public-url must be an absolute http(s):// URL, got "https://"`},
+		{name: "unparseable public url", host: "smtp.example.com", from: "wiki@example.com", publicURL: "https://wiki.example.com/%zz", security: "starttls", wantErr: `--public-url must be an absolute http(s):// URL, got "https://wiki.example.com/%zz"`},
+		{name: "unknown security", host: "smtp.example.com", from: "wiki@example.com", publicURL: "https://wiki.example.com", security: "ssl", wantErr: `--smtp-security must be one of none, starttls, tls, got "ssl"`},
+		{name: "password in an invalid public url is redacted", host: "smtp.example.com", from: "wiki@example.com", publicURL: "ftp://user:secret@wiki.example.com", security: "starttls", wantErr: `--public-url must be an absolute http(s):// URL, got "ftp://user:xxxxx@wiki.example.com"`},
+		{name: "password in an unparseable public url is redacted", host: "smtp.example.com", from: "wiki@example.com", publicURL: "https://user:secret@wiki.example.com/%zz", security: "starttls", wantErr: `--public-url must be an absolute http(s):// URL, got "https://user:xxxxx@wiki.example.com/%zz"`},
+		{name: "from is checked before public url", host: "smtp.example.com", security: "bogus", wantErr: "--smtp-from is required when --smtp-host is set"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateSMTPConfig(tc.host, tc.from, tc.publicURL, tc.security)
+			got := ""
+			if err != nil {
+				got = err.Error()
+			}
+			if got != tc.wantErr {
+				t.Fatalf("validateSMTPConfig(%q, %q, %q, %q) error = %q, want %q", tc.host, tc.from, tc.publicURL, tc.security, got, tc.wantErr)
+			}
+		})
+	}
+}
+
+// --public-url feeds canonical links too, so it is checked without SMTP; an
+// invalid value is only fatal where email links depend on it.
+func TestValidatePublicURL_FlagCombinations_ResolveWarnOrFail(t *testing.T) {
+	tests := []struct {
+		name        string
+		publicURL   string
+		basePath    string
+		smtp        bool
+		want        string
+		wantWarning string
+		wantErr     string
+	}{
+		{name: "unset", want: ""},
+		{name: "unset with smtp is left to validateSMTPConfig", smtp: true, want: ""},
+		{name: "origin without base path", publicURL: "https://wiki.example.com", want: "https://wiki.example.com"},
+		{name: "trailing slash matches empty base path", publicURL: "https://wiki.example.com/", want: "https://wiki.example.com/"},
+		{name: "path matches base path", publicURL: "https://wiki.example.com/wiki", basePath: "/wiki", want: "https://wiki.example.com/wiki"},
+		{name: "path with trailing slash matches base path", publicURL: "http://wiki.example.com:8080/wiki/", basePath: "/wiki", want: "http://wiki.example.com:8080/wiki/"},
+		{
+			name: "path differs from base path", publicURL: "https://wiki.example.com", basePath: "/wiki", want: "https://wiki.example.com",
+			wantWarning: `--public-url path "" does not match --base-path "/wiki"; canonical links use --base-path, email links use --public-url as given`,
+		},
+		{
+			name: "path without base path", publicURL: "https://wiki.example.com/docs", want: "https://wiki.example.com/docs",
+			wantWarning: `--public-url path "/docs" does not match --base-path ""; canonical links use --base-path, email links use --public-url as given`,
+		},
+		{
+			name: "invalid without smtp is ignored", publicURL: "wiki.example.com", want: "",
+			wantWarning: `--public-url must be an absolute http(s):// URL, got "wiki.example.com"; ignoring it`,
+		},
+		{
+			name: "unparseable without smtp is ignored", publicURL: "https://wiki.example.com/%zz", want: "",
+			wantWarning: `--public-url must be an absolute http(s):// URL, got "https://wiki.example.com/%zz"; ignoring it`,
+		},
+		{
+			name: "password in an ignored public url is redacted", publicURL: "wiki://user:secret@wiki.example.com", want: "",
+			wantWarning: `--public-url must be an absolute http(s):// URL, got "wiki://user:xxxxx@wiki.example.com"; ignoring it`,
+		},
+		{name: "invalid with smtp fails", publicURL: "ftp://wiki.example.com", smtp: true, wantErr: `--public-url must be an absolute http(s):// URL, got "ftp://wiki.example.com"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, warning, err := validatePublicURL(tc.publicURL, tc.basePath, tc.smtp)
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if got != tc.want || warning != tc.wantWarning || gotErr != tc.wantErr {
+				t.Fatalf("validatePublicURL(%q, %q, %v) = %q, %q, %q\nwant %q, %q, %q",
+					tc.publicURL, tc.basePath, tc.smtp, got, warning, gotErr, tc.want, tc.wantWarning, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateRedirectURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -269,6 +366,30 @@ func TestRootCommand_TrimsStringFlagValue(t *testing.T) {
 	})
 }
 
+// --public-url is a server option: email links use it today, canonical links
+// will later (GitHub #1292).
+func TestRootCommand_PublicURLResolvesIntoServerOptions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		args []string
+	}{
+		{name: "flag", args: []string{"--public-url= https://wiki.example.com "}},
+		{name: "environment variable", env: " https://wiki.example.com "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("LEAFWIKI_PUBLIC_URL", tc.env)
+			}
+			runRootCommand(t, tc.args, func(cfg *serverConfig) {
+				if got, want := cfg.server.publicURL, "https://wiki.example.com"; got != want {
+					t.Fatalf("public-url = %q, want %q", got, want)
+				}
+			})
+		})
+	}
+}
+
 func TestRootCommand_ResolutionPrecedence(t *testing.T) {
 	t.Run("environment variable overrides the default", func(t *testing.T) {
 		t.Setenv("LEAFWIKI_HOST", "0.0.0.0")
@@ -298,6 +419,33 @@ func TestRootCommand_ResolutionPrecedence(t *testing.T) {
 	})
 }
 
+func TestRootCommand_DisableSecurityHeaders_ResolvesFlagAndEnv(t *testing.T) {
+	t.Run("headers are on by default", func(t *testing.T) {
+		runRootCommand(t, nil, func(cfg *serverConfig) {
+			if cfg.server.disableSecurityHeaders {
+				t.Fatal("disable-security-headers = true by default, want false")
+			}
+		})
+	})
+
+	t.Run("flag", func(t *testing.T) {
+		runRootCommand(t, []string{"--disable-security-headers"}, func(cfg *serverConfig) {
+			if !cfg.server.disableSecurityHeaders {
+				t.Fatal("disable-security-headers = false, want true")
+			}
+		})
+	})
+
+	t.Run("environment variable", func(t *testing.T) {
+		t.Setenv("LEAFWIKI_DISABLE_SECURITY_HEADERS", "true")
+		runRootCommand(t, nil, func(cfg *serverConfig) {
+			if !cfg.server.disableSecurityHeaders {
+				t.Fatal("disable-security-headers = false, want true")
+			}
+		})
+	})
+}
+
 // An environment variable that is declared without a value must not override a
 // default: compose and .env files do that routinely, and taking an empty
 // LEAFWIKI_HOST literally would bind the server to every interface.
@@ -317,6 +465,138 @@ func TestRootCommand_EmptyEnvVarIsUnset(t *testing.T) {
 			t.Fatal("snapshot = false, want the default true")
 		}
 	})
+}
+
+// setServiceLink sets the variables the kubelet writes for a Service whose
+// name upper-cases to prefix.
+func setServiceLink(t *testing.T, prefix, proto, host, port string) {
+	t.Helper()
+	t.Setenv(prefix+"_SERVICE_HOST", host)
+	t.Setenv(prefix+"_SERVICE_PORT", port)
+	t.Setenv(prefix+"_PORT", proto+"://"+net.JoinHostPort(host, port))
+}
+
+// A Kubernetes service link value names the Service's port, not the one the
+// server should listen on, so it counts as unset instead of failing startup.
+// Services named leafwiki, leafwiki-metrics and leafwiki-smtp set the three.
+func TestRootCommand_KubernetesServiceLinkPortIsUnset(t *testing.T) {
+	for _, tc := range []struct{ proto, host string }{
+		{"tcp", "10.96.165.88"},
+		{"udp", "10.96.165.88"},
+		{"sctp", "fd00::1"},
+	} {
+		t.Run(tc.proto+" "+tc.host, func(t *testing.T) {
+			for _, prefix := range []string{"LEAFWIKI", "LEAFWIKI_METRICS", "LEAFWIKI_SMTP"} {
+				setServiceLink(t, prefix, tc.proto, tc.host, "80")
+			}
+			runRootCommand(t, nil, func(cfg *serverConfig) {
+				if got, want := cfg.server.port, "8080"; got != want {
+					t.Errorf("port = %q, want %q", got, want)
+				}
+				if got, want := cfg.metrics.metricsPort, "9091"; got != want {
+					t.Errorf("metrics-port = %q, want %q", got, want)
+				}
+				if got, want := cfg.email.smtpPort, 587; got != want {
+					t.Errorf("smtp-port = %d, want %d", got, want)
+				}
+			})
+		})
+	}
+}
+
+// Only the exact value the kubelet writes is skipped; anything else that
+// merely looks like one is a configuration mistake and stops startup.
+func TestRootCommand_PortResemblingServiceLinkFailsFast(t *testing.T) {
+	for _, tc := range []struct{ name, host, port, value string }{
+		{"no service host", "", "", "tcp://10.96.0.10:80"},
+		{"other host", "10.96.0.10", "80", "tcp://10.96.0.11:80"},
+		{"other port", "10.96.0.10", "80", "tcp://10.96.0.10:81"},
+		{"other protocol", "10.96.0.10", "80", "http://10.96.0.10:80"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("LEAFWIKI_SERVICE_HOST", tc.host)
+			t.Setenv("LEAFWIKI_SERVICE_PORT", tc.port)
+			t.Setenv("LEAFWIKI_PORT", tc.value)
+
+			cmd := newRootCommand()
+			cmd.Writer = io.Discard
+			cmd.ErrWriter = io.Discard
+			cmd.Action = func(_ context.Context, _ *cli.Command) error {
+				t.Fatalf("expected LEAFWIKI_PORT=%q to be rejected before the action runs", tc.value)
+				return nil
+			}
+			if err := cmd.Run(context.Background(), []string{"leafwiki"}); err == nil {
+				t.Fatalf("expected an error for LEAFWIKI_PORT=%q, got nil", tc.value)
+			}
+		})
+	}
+}
+
+func TestIgnoredServiceLinkVars_ListsSkippedPortVarsNotSetOnCommandLine(t *testing.T) {
+	setServiceLink(t, "LEAFWIKI", "tcp", "10.96.165.88", "80")
+	setServiceLink(t, "LEAFWIKI_METRICS", "tcp", "10.96.165.89", "9100")
+	t.Setenv("LEAFWIKI_SMTP_PORT", "2525")
+
+	isSet := func(name string) bool { return name == "metrics-port" }
+	got := ignoredServiceLinkVars((&serverConfig{}).flags(), isSet)
+	if want := []string{"LEAFWIKI_PORT"}; !slices.Equal(got, want) {
+		t.Errorf("ignoredServiceLinkVars = %v, want %v", got, want)
+	}
+}
+
+// kubeletVarPatterns match every variable the kubelet writes for a Service S:
+// S_SERVICE_HOST, S_SERVICE_PORT[_<name>], S_PORT and
+// S_PORT_<n>_<PROTO>[_ADDR|_PORT|_PROTO]. A Service whose name starts with
+// leafwiki writes them into the LEAFWIKI_ namespace.
+var kubeletVarPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`_SERVICE_HOST$`),
+	regexp.MustCompile(`_SERVICE_PORT(_|$)`),
+	regexp.MustCompile(`_PORT$`),
+	regexp.MustCompile(`_PORT_[0-9]+_(TCP|UDP|SCTP)(_|$)`),
+}
+
+// TestServerFlags_KubeletCanOnlyShadowPortVarsThatSkipServiceLinks keeps new
+// collisions out: a flag variable the kubelet can write must be a port read
+// through envPortVars, every other flag needs a name outside the patterns.
+func TestServerFlags_KubeletCanOnlyShadowPortVarsThatSkipServiceLinks(t *testing.T) {
+	for _, flag := range (&serverConfig{}).flags() {
+		envFlag, ok := flag.(cli.DocGenerationFlag)
+		if !ok {
+			continue
+		}
+		for _, key := range envFlag.GetEnvVars() {
+			shadowable := slices.ContainsFunc(kubeletVarPatterns, func(re *regexp.Regexp) bool { return re.MatchString(key) })
+			if !shadowable {
+				continue
+			}
+			if !strings.HasSuffix(key, "_PORT") {
+				t.Errorf("%s can be written by the kubelet for a Service; rename flag --%s", key, flag.Names()[0])
+				continue
+			}
+			if !skipsServiceLinks(flag, key) {
+				t.Errorf("%s can be written by the kubelet for a Service; read it with envPortVars", key)
+			}
+		}
+	}
+}
+
+// skipsServiceLinks reports whether flag reads key through envPortVars. The
+// flag types share no accessor for their sources, hence the reflection.
+func skipsServiceLinks(flag cli.Flag, key string) bool {
+	sources := reflect.ValueOf(flag).Elem().FieldByName("Sources")
+	if !sources.IsValid() {
+		return false
+	}
+	chain, ok := sources.Interface().(cli.ValueSourceChain)
+	if !ok {
+		return false
+	}
+	for _, src := range chain.Chain {
+		if env, ok := src.(*envVarSource); ok && env.key == key && env.skipServiceLink {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRootCommand_BoolEnvVarSpellings(t *testing.T) {
@@ -356,8 +636,16 @@ func TestRootCommand_InvalidEnvVarValueFailsFast(t *testing.T) {
 		{"LEAFWIKI_RESTORE_UPLOAD_MAX_SIZE", "0"},
 		{"LEAFWIKI_LOGIN_URL", "javascript:alert(1)"},
 		{"LEAFWIKI_TOTP_ENCRYPTION_KEY", "too-short"},
+		{"LEAFWIKI_PORT", "abc"},
+		{"LEAFWIKI_PORT", "0"},
+		{"LEAFWIKI_PORT", "65536"},
+		{"LEAFWIKI_PORT", "tcp://10.96.0.10:80"},
+		{"LEAFWIKI_METRICS_PORT", "abc"},
+		{"LEAFWIKI_METRICS_PORT", "-1"},
+		{"LEAFWIKI_SMTP_PORT", "0"},
+		{"LEAFWIKI_SMTP_PORT", "65536"},
 	} {
-		t.Run(tc.envVar, func(t *testing.T) {
+		t.Run(tc.envVar+"="+tc.value, func(t *testing.T) {
 			t.Setenv(tc.envVar, tc.value)
 
 			cmd := newRootCommand()
@@ -372,6 +660,37 @@ func TestRootCommand_InvalidEnvVarValueFailsFast(t *testing.T) {
 				t.Fatalf("expected an error for %s=%q, got nil", tc.envVar, tc.value)
 			}
 		})
+	}
+}
+
+// The port flags are checked when the command line is parsed, so a bad value
+// stops startup with the flag named instead of a listen error later on.
+func TestRootCommand_InvalidPortFlagFailsFast(t *testing.T) {
+	for _, arg := range []string{"--port=abc", "--port=99999", "--metrics-port=http", "--smtp-port=0"} {
+		t.Run(arg, func(t *testing.T) {
+			cmd := newRootCommand()
+			cmd.Writer = io.Discard
+			cmd.ErrWriter = io.Discard
+			cmd.Action = func(_ context.Context, _ *cli.Command) error {
+				t.Fatalf("expected %s to be rejected before the action runs", arg)
+				return nil
+			}
+			if err := cmd.Run(context.Background(), []string{"leafwiki", arg}); err == nil {
+				t.Fatalf("expected an error for %s, got nil", arg)
+			}
+		})
+	}
+}
+
+func TestValidatePortValue(t *testing.T) {
+	for _, v := range []string{"1", "8080", "65535"} {
+		if err := validatePortValue(v); err != nil {
+			t.Errorf("validatePortValue(%q) = %v, want nil", v, err)
+		}
+	}
+	err := validatePortValue("tcp://10.96.0.10:80")
+	if err == nil || !strings.Contains(err.Error(), "enableServiceLinks") {
+		t.Errorf("validatePortValue(tcp://…) = %v, want a hint at enableServiceLinks", err)
 	}
 }
 
@@ -1173,6 +1492,15 @@ func TestDockerfileBuilder_GoBuildStage_DeclaresAppVersionArg(t *testing.T) {
 // output depends on the local repo's tag state and CI checkout depth.
 func TestResolveVersionScript_AppVersionEnvOverride_ReturnsEnvValue(t *testing.T) {
 	scriptPath := filepath.Join("..", "..", "scripts", "resolve-version.sh")
+
+	// Windows can't execute a shell script directly, and no shell can be
+	// assumed there: bash on PATH may be the WSL launcher, and sh is only
+	// there with Git for Windows. The script is a Unix build tool (make, vite),
+	// so run it where its shebang works. Not through sh elsewhere either: the
+	// script uses `set -o pipefail`, which dash rejects.
+	if runtime.GOOS == "windows" {
+		t.Skip("resolve-version.sh is a Unix build script; Windows can't execute it directly")
+	}
 
 	cmd := exec.Command(scriptPath)
 	cmd.Env = append(os.Environ(), "APP_VERSION=v9.9.9-test")

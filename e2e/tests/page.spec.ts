@@ -1060,15 +1060,9 @@ async function expectOpenedPageMarkedInNavigationDuringEditMode(
 test.describe('Authenticated', () => {
   test.beforeEach(async ({ page }) => {
     const loginPage = new LoginPage(page);
-    await loginPage.goto();
-    await loginPage.login(user, password);
+    await loginPage.loginViaApi(user, password);
     const viewPage = new ViewPage(page);
     await viewPage.expectUserLoggedIn();
-  });
-
-  test.afterEach(async ({ page }) => {
-    const viewPage = new ViewPage(page);
-    await viewPage.logout();
   });
 
   test('create-page', async ({ page }) => {
@@ -1621,6 +1615,130 @@ Body text.`;
     test.expect(styles.position).not.toBe('absolute');
   });
 
+  // Regression for #1743: inline code kept a fixed 0.75rem inside every
+  // heading, so it stayed 12px next to 36px heading text.
+  test('inline code scales with the heading level', async ({ page }) => {
+    const timestamp = Date.now();
+    const slug = `heading-inline-code-scale-${timestamp}`;
+    const title = `Heading Inline Code Scale ${timestamp}`;
+    const content = [
+      '# `h1 hello` world',
+      '',
+      '## `h2 hello` world',
+      '',
+      '### `h3 hello` world',
+      '',
+      'Body `inline code` text.',
+    ].join('\n');
+
+    await createPageWithContent(page, { title, slug, content });
+
+    const viewPage = new ViewPage(page);
+    await viewPage.goto(`/${slug}`);
+
+    const measureCode = async (selector: string) => {
+      const container = page
+        .locator(selector)
+        .filter({ has: page.locator('code.inline-code') })
+        .first();
+      await container.waitFor({ state: 'visible' });
+      return container.evaluate((element) => {
+        const code = element.querySelector('code.inline-code') as HTMLElement;
+        return {
+          container: parseFloat(window.getComputedStyle(element).fontSize),
+          code: parseFloat(window.getComputedStyle(code).fontSize),
+        };
+      });
+    };
+
+    const h1 = await measureCode('article h1');
+    const h2 = await measureCode('article h2');
+    const h3 = await measureCode('article h3');
+    const body = await measureCode('article p');
+
+    // The code follows the heading level instead of staying at the body size.
+    test.expect(h1.code).toBeGreaterThan(body.code);
+    test.expect(h1.code).toBeGreaterThan(h2.code);
+    test.expect(h2.code).toBeGreaterThan(h3.code);
+
+    // The same share of the surrounding text at every level, and never bigger.
+    const ratio = (sizes: { container: number; code: number }) => sizes.code / sizes.container;
+    test.expect(ratio(h1)).toBeCloseTo(ratio(h2), 1);
+    test.expect(ratio(h1)).toBeCloseTo(ratio(h3), 1);
+    test.expect(ratio(body)).toBeCloseTo(ratio(h1), 1);
+    test.expect(ratio(h1)).toBeGreaterThanOrEqual(0.7);
+    test.expect(ratio(h1)).toBeLessThan(1);
+  });
+
+  // Regression for #1802: the inline-code wrapper was an inline-block, whose
+  // baseline is its last line. Table cells align on the baseline, so a label
+  // next to wrapped inline code dropped to the code's last line. (Firefox also
+  // let it overflow the row; the suite runs Chromium only, so that part was
+  // checked by hand.) The fix must not lift single-line code off the text
+  // baseline either.
+  test('wrapped inline code in a table keeps the row cells aligned at the top', async ({
+    page,
+  }) => {
+    const timestamp = Date.now();
+    const slug = `table-inline-code-wrap-${timestamp}`;
+    const title = `Table Inline Code Wrap ${timestamp}`;
+    const content = [
+      '|What|Command|Where|',
+      '|-|-|-|',
+      '|Add sshkey|`ssh-copy-id -i ~/.ssh/id_ed25519 root@your-vps-ip-with-a-long-name`|remote|',
+      '',
+      'Run `whoami` first.',
+    ].join('\n');
+
+    // Desktop width (useIsMobile is < 768px), so the copy button is rendered too.
+    await page.setViewportSize({ width: 820, height: 900 });
+    await createPageWithContent(page, { title, slug, content });
+
+    const viewPage = new ViewPage(page);
+    await viewPage.goto(`/${slug}`);
+
+    const code = page.locator('article table code.inline-code');
+    await code.waitFor({ state: 'visible' });
+
+    const layout = await code.evaluate((element) => {
+      const row = element.closest('tr') as HTMLElement;
+      const label = row.querySelector('td') as HTMLElement;
+      const range = document.createRange();
+      range.selectNodeContents(label);
+      return {
+        codeLines: element.getClientRects().length,
+        codeTop: element.getBoundingClientRect().top,
+        labelTop: range.getBoundingClientRect().top,
+        labelBottom: range.getBoundingClientRect().bottom,
+        rowBottom: row.getBoundingClientRect().bottom,
+        boxDecorationBreak: window.getComputedStyle(element).boxDecorationBreak,
+      };
+    });
+
+    // The scenario only holds if the code actually wraps.
+    test.expect(layout.codeLines).toBeGreaterThan(1);
+    // The label starts on the code's first line, not its last.
+    test.expect(Math.abs(layout.labelTop - layout.codeTop)).toBeLessThan(8);
+    test.expect(layout.labelBottom).toBeLessThanOrEqual(layout.rowBottom);
+    // Every wrapped line gets its own padding and rounded corners.
+    test.expect(layout.boxDecorationBreak).toBe('clone');
+
+    // An empty inline-block sits on the baseline of its line: one inside the
+    // code and one in the text beside it must line up.
+    const paragraphCode = page.locator('article p code.inline-code');
+    const baselineOffset = await paragraphCode.evaluate((element) => {
+      const marker = () => {
+        const span = document.createElement('span');
+        span.style.display = 'inline-block';
+        return span;
+      };
+      const inCode = element.appendChild(marker());
+      const inText = (element.closest('p') as HTMLElement).appendChild(marker());
+      return inCode.getBoundingClientRect().top - inText.getBoundingClientRect().top;
+    });
+    test.expect(Math.abs(baselineOffset)).toBeLessThan(1);
+  });
+
   test('headline hash navigation keeps target below sticky toc', async ({ page }) => {
     const timestamp = Date.now();
     const slug = `headline-anchor-sticky-${timestamp}`;
@@ -1777,6 +1895,44 @@ Content.`;
     });
 
     await expect(lastEntry).toBeInViewport();
+  });
+
+  test('toc side panel and subheader stay in the layout when headings use their ids', async ({
+    page,
+  }) => {
+    const timestamp = Date.now();
+    const slug = `toc-layout-ids-${timestamp}`;
+    const title = `Toc Layout Ids ${timestamp}`;
+    // The slugs of these headings are the ids of the layout's own portal
+    // targets.
+    const content = `# Intro
+
+Intro text.
+
+## App toc pane root
+
+Content.
+
+## App subheader root
+
+Content.
+
+## Section Three
+
+Content.`;
+
+    await createPageWithContent(page, { title, slug, content });
+
+    const viewPage = new ViewPage(page);
+    await viewPage.goto(`/${slug}`);
+
+    await expect(page.locator('article h2#app-toc-pane-root')).toBeVisible();
+    await expect(
+      page.locator('.app-layout__toc-pane [data-testid="toc-side-panel"]'),
+    ).toBeVisible();
+    await expect(page.locator('.app-layout__subheader-root .page-viewer__subheader')).toBeVisible();
+    await expect(page.locator('article [data-testid="toc-side-panel"]')).toHaveCount(0);
+    await expect(page.locator('article .page-viewer__subheader')).toHaveCount(0);
   });
 
   test('subheader stays in lockstep with toc pane width when leaving a toc page', async ({
@@ -3603,12 +3759,8 @@ Paragraph outside the list.
 
     const searchView = new SearchView(page);
     const accordion = searchView.getTagAccordion();
-    const accordionCount = await accordion.count();
-
-    if (accordionCount === 0) {
-      await expect(accordion).toHaveCount(0);
-      return;
-    }
+    // Re-asserting the 0 here raced with tags loading after the count.
+    if ((await accordion.count()) === 0) return;
 
     await expect(accordion).toBeVisible();
     await page.getByTestId('search-tags-accordion-trigger').click();

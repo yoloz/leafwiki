@@ -1,7 +1,8 @@
+import type { PageDisplay, PageDisplayPatch } from '@/lib/pageDisplay'
 import { fetchWithAuth } from './auth'
 
 const PUBLIC_ACCESS_URL = '/api/admin/settings/public-access'
-const TOC_DISPLAY_URL = '/api/admin/settings/toc-display'
+const PAGE_DISPLAY_URL = '/api/admin/settings/display'
 
 export type PublicAccessResponse = {
   enabled: boolean
@@ -21,19 +22,18 @@ export async function setPublicAccess(
   })
 }
 
-export type TocDisplayResponse = {
-  alwaysShow: boolean
-}
-
 /**
- * Toggle "always show table of contents" (show the TOC panel/dropdown
- * regardless of heading count) at runtime.
+ * Change any of the instance-wide page display settings. The server applies
+ * the given fields in one write and replies with all display settings.
+ * Rejects with an ApiLocalizedError carrying code
+ * `page_display_invalid_content_width` (HTTP 400) for a width the server
+ * doesn't know; nothing is changed then.
  */
-export async function setAlwaysShowToc(
-  alwaysShow: boolean,
-): Promise<TocDisplayResponse> {
-  return await fetchWithAuth<TocDisplayResponse>(TOC_DISPLAY_URL, {
+export async function updatePageDisplay(
+  patch: PageDisplayPatch,
+): Promise<PageDisplay> {
+  return await fetchWithAuth<PageDisplay>(PAGE_DISPLAY_URL, {
     method: 'PUT',
-    body: JSON.stringify({ alwaysShow }),
+    body: JSON.stringify(patch),
   })
 }

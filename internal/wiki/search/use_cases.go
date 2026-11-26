@@ -2,8 +2,13 @@ package search
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	sharederrors "github.com/perber/wiki/internal/core/shared/errors"
 	"github.com/perber/wiki/internal/core/shared/htmlutil"
@@ -13,11 +18,40 @@ import (
 	coretags "github.com/perber/wiki/internal/tags"
 )
 
+// Caps on the text query of one search. Each search term is one more MATCH
+// over the whole index (plus the rank tiers), so a long query of short words
+// costs far more than a long word; the term cap is the one that matters, the
+// rune cap bounds the parsing work before it. The cost grows linearly with
+// the terms, so the cap bounds the worst case; it does not make it cheap.
+const (
+	maxQueryRunes = 256
+	maxQueryTerms = 12
+)
+
+// searchTimeout bounds the index queries of one search. The query caps
+// bound a query's cost in terms, not in time; on a large wiki even a capped
+// query can run long, and without a deadline it holds a connection and the
+// index's read lock until it is done. A var so tests can shorten it. The
+// 503 description of handleSearch in routes.go names this value; keep them
+// in sync.
+var searchTimeout = 10 * time.Second
+
 var ErrSearchUnavailable = sharederrors.NewLocalizedError(
 	ErrCodeSearchUnavailable,
 	"Search is currently unavailable",
 	"search is currently unavailable",
 	nil,
+)
+
+// ErrSearchQueryTooLong rejects a query over maxQueryRunes runes or
+// maxQueryTerms terms. It is rejected rather than truncated, so the hits
+// always match what the user typed.
+var ErrSearchQueryTooLong = sharederrors.NewLocalizedError(
+	ErrCodeSearchQueryTooLong,
+	"Search query is too long: at most "+strconv.Itoa(maxQueryRunes)+" characters and "+strconv.Itoa(maxQueryTerms)+" terms",
+	"search query is too long: at most %s characters and %s terms",
+	nil,
+	strconv.Itoa(maxQueryRunes), strconv.Itoa(maxQueryTerms),
 )
 
 // ─── SearchUseCase ───────────────────────────────────────────────────────────
@@ -37,16 +71,53 @@ type SearchUseCase struct {
 	index *coresearch.SQLiteIndex
 	tags  *coretags.TagsService
 	tree  *tree.TreeService
+	log   *slog.Logger
 }
 
-func NewSearchUseCase(idx *coresearch.SQLiteIndex, tags *coretags.TagsService, tree *tree.TreeService) *SearchUseCase {
-	return &SearchUseCase{index: idx, tags: tags, tree: tree}
+func NewSearchUseCase(idx *coresearch.SQLiteIndex, tags *coretags.TagsService, tree *tree.TreeService, log *slog.Logger) *SearchUseCase {
+	return &SearchUseCase{index: idx, tags: tags, tree: tree, log: log.With("component", "SearchUseCase")}
 }
 
-func (uc *SearchUseCase) Execute(_ context.Context, in SearchInput) (*SearchOutput, error) {
+// Paging bounds for a search. The text index treats a negative limit as "all
+// rows", so without an upper bound one request could rank, excerpt and
+// serialize every page of the wiki. A huge offset is capped as well: SQLite
+// can only keep the top offset+limit rows while sorting, so an unbounded
+// offset makes it hold every matching row, content included.
+const (
+	searchDefaultLimit = 20
+	searchMaxLimit     = 100
+	searchMaxOffset    = 10_000
+)
+
+// boundPaging turns a limit below 1 into the default, caps it at
+// searchMaxLimit, turns a negative offset into 0 and caps the offset at
+// searchMaxOffset, the same substitute-don't-reject shape GET /api/tags uses.
+func boundPaging(offset, limit int) (int, int) {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > searchMaxOffset {
+		offset = searchMaxOffset
+	}
+	if limit < 1 {
+		limit = searchDefaultLimit
+	}
+	if limit > searchMaxLimit {
+		limit = searchMaxLimit
+	}
+	return offset, limit
+}
+
+func (uc *SearchUseCase) Execute(ctx context.Context, in SearchInput) (*SearchOutput, error) {
+	query := strings.TrimSpace(in.Query)
+	if utf8.RuneCountInString(query) > maxQueryRunes || coresearch.QueryTermCount(query) > maxQueryTerms {
+		return nil, ErrSearchQueryTooLong
+	}
+
 	if uc.index == nil {
 		return nil, ErrSearchUnavailable
 	}
+	in.Offset, in.Limit = boundPaging(in.Offset, in.Limit)
 
 	var pageIDs []string
 	if len(in.Tags) > 0 {
@@ -60,23 +131,46 @@ func (uc *SearchUseCase) Execute(_ context.Context, in SearchInput) (*SearchOutp
 		}
 	}
 
-	if strings.TrimSpace(in.Query) == "" && len(pageIDs) > 0 {
+	if query == "" && len(pageIDs) > 0 {
 		return uc.searchByTags(pageIDs, in.Offset, in.Limit)
 	}
 
-	result, err := uc.index.Search(in.Query, pageIDs, in.Offset, in.Limit)
+	ctx, cancel := context.WithTimeout(ctx, searchTimeout)
+	defer cancel()
+
+	result, err := uc.index.Search(ctx, in.Query, pageIDs, in.Offset, in.Limit)
 	if err != nil {
-		return nil, err
+		return nil, uc.searchQueryError(ctx, err, query)
 	}
 
-	fullMatchPageIDs, err := uc.index.SearchPageIDs(in.Query, pageIDs)
+	fullMatchPageIDs, err := uc.index.SearchPageIDs(ctx, in.Query, pageIDs)
 	if err != nil {
-		return nil, err
+		return nil, uc.searchQueryError(ctx, err, query)
 	}
 
 	uc.attachTags(result.Items)
 	result.TagFacets = uc.buildTagFacets(fullMatchPageIDs)
 	return &SearchOutput{Result: result}, nil
+}
+
+// searchQueryError maps an index error once ctx has ended: a timeout becomes
+// ErrSearchUnavailable and is logged here, where it stops propagating; the
+// log has the query's size, never its text, which may be private. A canceled
+// ctx (the client went away) comes back as context.Canceled and is not
+// logged; the handler answers it without a body. Checking ctx and not only
+// err also catches a driver error that doesn't wrap the context's error.
+func (uc *SearchUseCase) searchQueryError(ctx context.Context, err error, query string) error {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
+		uc.log.Warn("search timed out",
+			"queryRunes", utf8.RuneCountInString(query),
+			"terms", coresearch.QueryTermCount(query))
+		return ErrSearchUnavailable
+	case ctx.Err() != nil:
+		return ctx.Err()
+	default:
+		return err
+	}
 }
 
 func (uc *SearchUseCase) searchByTags(pageIDs []string, offset, limit int) (*SearchOutput, error) {
@@ -115,13 +209,9 @@ func (uc *SearchUseCase) searchByTags(pageIDs []string, offset, limit int) (*Sea
 		return items[i].Title < items[j].Title
 	})
 
-	if offset < 0 {
-		offset = 0
-	}
-	if limit <= 0 {
-		limit = 20
-	}
-
+	// Execute already bounds the paging; this keeps direct callers safe too,
+	// since items[offset:end] below panics on a negative offset.
+	offset, limit = boundPaging(offset, limit)
 	count := len(items)
 	if offset > count {
 		offset = count

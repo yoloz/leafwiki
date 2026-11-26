@@ -12,12 +12,12 @@ where," those answer "how does layer X work" and "how does flow Y run." Part of 
 `internal/core/*` (filesystem/DB primitives — tree, auth, markdown, revision) into the top-level
 derived-index packages (`internal/links`, `internal/tags`, `internal/properties`, `internal/search`,
 `internal/favorites`, `internal/usersettings`, `internal/avatar`, `internal/publicaccess`,
-`internal/tocdisplay`, `internal/snapshot`, `internal/restore`, `internal/backup`,
+`internal/pagedisplay`, `internal/snapshot`, `internal/restore`, `internal/backup`,
 `internal/branding`, `internal/importer`), then into the `internal/wiki/<domain>` slices (`pages`,
-`pagesave`, `auth`, `resync`, `revisions`, `search`, `links`, `tags`, `properties`, `apikeys`,
+`pagesave`, `auth`, `resync`, `revisions`, `search`, `links`, `tags`, `properties`, `apikeys`, `shares`,
 `assets`, `avatar`, `backup`, `branding`, `health`, `importer`, `instancesettings`, `restore`,
-`snapshot`, `usersettings`) that each expose HTTP routes via
-`internal/http`. See [ADR-0001: Filesystem as Source of Truth](./adr/0001-filesystem-source-of-truth.md) for why the split between
+`seo`, `snapshot`, `usersettings`) that each expose HTTP routes (or, for `seo`, SPA shell
+responders) via `internal/http`. See [ADR-0001: Filesystem as Source of Truth](./adr/0001-filesystem-source-of-truth.md) for why the split between
 filesystem-canonical (`tree`, `revision`) and SQLite-derived (`links`, `tags`, `properties`,
 `search`) packages exists.
 
@@ -45,7 +45,8 @@ filesystem-canonical (`tree`, `revision`) and SQLite-derived (`links`, `tags`, `
   (markdown files + frontmatter under `root/`). `TreeService` (guarded by a single `sync.RWMutex`)
   is the one component allowed to mutate the tree: create/move/delete/copy pages and sections.
   `tree_service.go` holds the type, its lifecycle and the lock helpers; mutations live in
-  `tree_mutations.go`, reads in `tree_reads.go`, the lookup indexes in `tree_index.go`.
+  `tree_mutations.go`, reads in `tree_reads.go` (including the locked route reads `PageRoutes`,
+  `ChildRoutes` and `SubtreeRoutes`), the lookup indexes in `tree_index.go`.
   `node_store.go` holds the `NodeStore` type, page reads and the path/metadata helpers;
   `node_store_reconstruct.go` rebuilds the tree from disk (walks `root/`, reads `leafwiki_id`
   frontmatter); `node_store_write.go` holds the file write paths.
@@ -59,7 +60,10 @@ filesystem-canonical (`tree`, `revision`) and SQLite-derived (`links`, `tags`, `
 - **`internal/core/markdown`** — markdown-file abstraction independent of the tree: `markdown.go`
   (`MarkdownFile` — path-aware read/write with title extraction), `frontmatter.go` (YAML frontmatter
   parse/serialize), `reserved.go` (`IsSystemKey` — `tags` and any `leafwiki_`-prefixed key are
-  reserved, `title` is not and round-trips as a normal custom property).
+  reserved, `title` is not and round-trips as a normal custom property), `links.go`
+  (`ParseWikiLinks` — the `[[Target|Alias]]` pattern; `NormalizeRoutePath` and
+  `ResolveFolderRelative` — "page is folder" resolution of relative hrefs; tree lookups stay in
+  `internal/links`).
 - **`internal/core/auth`** — local identity and session primitives, largest `core` package.
   `auth_service.go` (`AuthService`, password+TOTP login orchestration, `loginChallengeLifetime` =
   5 min bridging the two login steps), `session_manager.go` (`SessionManager` — JWT access/refresh
@@ -84,7 +88,8 @@ filesystem-canonical (`tree`, `revision`) and SQLite-derived (`links`, `tags`, `
   size.
 - **`internal/core/excerpt`** — `excerpt.go` renders a short plain-text excerpt (`MaxRunes = 180`)
   from a page's markdown via `goldmark` + `bluemonday` HTML sanitization, used by search results
-  and tag listings.
+  and tag listings. `FromBodyStart` does the same over the start of the body, for excerpts built
+  per request (page meta tags).
 - **`internal/core/ignore`** — `.leafwikiignore` support (`gitignore`-syntax matcher via
   `sabhiram/go-gitignore`), consulted by tree reconstruction/resync/backup to skip paths.
 - **`internal/core/shared`** — cross-cutting helpers with no business logic of their own:
@@ -134,7 +139,8 @@ resync-derived state.
   frontmatter keys): `properties_store.go` (`properties.db`), `properties_service.go`.
 - **`internal/search`** — full-text search index: `sqlite_index.go` (`search.db`, FTS via
   `modernc.org/sqlite`, goldmark-based content extraction + `htmlutil` sanitization),
-  `indexing_status.go`, `search_result.go`.
+  `search_query.go` (user input → FTS5 MATCH argument and literal terms, WHERE/rank/snippet
+  expressions), `indexing_status.go`, `search_result.go`.
 - **`internal/usersettings`** — per-user preferences (language, auto-save, date/time format):
   `usersettings_store.go` (`usersettings.db`), `usersettings_service.go`, `language.go`
   (allowed languages), `dateformat.go`. Real state, part of full backup/restore.
@@ -143,8 +149,30 @@ resync-derived state.
 - **`internal/publicaccess`** — the public-access ("public mode") switch. `NewEnvManaged` when
   pinned by `--public-access`/`--disable-auth`, `NewSettingsManaged` when changeable at runtime
   via `internal/core/settings`.
-- **`internal/tocdisplay`** — the instance-wide "always show table of contents" flag, same
-  provider pattern (`Provider` interface, `Fixed` for flag-pinned values).
+- **`internal/render`** — `RenderHTML`: page Markdown → sanitized HTML for search-engine
+  crawlers (#1292). `wikilink.go` (goldmark inline parser, resolver callback), `links.go`
+  (folder-relative links, base path, asset images), `policy.go` (bluemonday allow-list, no
+  `id`/`name`/`class`/`style`). No tree, no HTTP. [ADR-0020](./adr/0020-server-rendered-page-html-for-crawlers.md).
+- **`internal/scopedread`** — the read boundary for callers that may see only part of the wiki
+  (share links, #1252): `ReadScope` (a root page, optionally with its subtree) and
+  `PageReader`, which checks the scope before reading and returns an allow-listed `PageView`, and
+  `TreeReader`, which returns the scope as a tree of allow-listed `TreeNodeView`s with nothing above
+  the root. Out of scope, unknown and deleted pages are the same `ErrNotFound`.
+  [ADR-0015](./adr/0015-scoped-read-boundary.md).
+- **`internal/sharing`** — share links (#1252, experimental, `--enable-share-links`):
+  `share_link_store.go` (`share_links.db`, own file, real state, part of full backup/restore;
+  only a SHA-256 hash of each token is stored), `share_link_service.go` (create, revoke,
+  resolve a token to a `Grant`; unknown, malformed, expired and revoked tokens all give
+  `share_link_not_found`), `token.go` (256-bit `lws_` tokens). What a resolved link may read is
+  decided by the scoped read layer (`internal/scopedread`, ADR-0015).
+- **`internal/pagedisplay`** — the instance-wide page display settings behind the admin
+  "Display" settings page (the "always show table of contents" flag, the page content
+  width, an enum validated in `content_width.go`, and the "show subpage count" flag), stored in
+  `toc-display.json` (`FileName`; old name kept for existing data dirs and backups); same
+  provider pattern (`Provider` returns all of them as one `Settings` value, `Fixed` for tests).
+  `GET /api/config` merges `Settings.ConfigFields()` in flat, so a new display setting needs no
+  change in the HTTP layer. Writes go through `Service.Update(Patch)` (pointer fields, all
+  validated before one write); `IsInvalidInput` tells the HTTP layer which codes are 400s.
 - **`internal/favorites`** — per-user private favorited-pages list. `favorites_store.go`
   (`favorites.db`, own file). Explicitly documented in its own package doc comment as *not*
   filesystem-derived and therefore never touched by resync.
@@ -160,6 +188,10 @@ resync-derived state.
   (OS-specific self-restart after restore, same unix/windows split pattern as `cmd/leafwiki`),
   `offline.go` (CLI-driven restore path outside the running server). See
   [ADR-0009: Session Manager Extraction](./adr/0009-session-manager-extraction.md) for why session invalidation is its own restore phase.
+  State databases other than `users.db` are registered once in `stateDBs` (`swap.go`): snapshots
+  capture them (`StateDBFiles`), a restore sanity-checks and swaps them, and the composition root
+  passes the live stores as `Config.Stores` (`Wiki.StateStores`).
+  [ADR-0016](./adr/0016-state-store-registration.md).
 - **`internal/backup`** — git-based off-site backup of the markdown tree (`repo.go`, `go-git/go-git`
   — no shell-out to a `git` binary, matters for the single-binary story), `scheduler.go` (same
   manual-mode-at-interval-0 pattern as `snapshot`), `conflict_test.go`/`gitignore.go`,
@@ -184,9 +216,17 @@ resync-derived state.
   `internal/importer/fixtures/`.
 - **`internal/http`** — the shared router *infrastructure* (not a domain slice itself).
   `router.go` builds the `gin.Engine`, embeds the built frontend (`//go:embed dist/**`, gated by
-  the `EmbedFrontend` build-time flag), sets up request logging via `slog`. `registrar.go` defines
+  the `EmbedFrontend` build-time flag), sets up request logging via `slog`. `shell.go` serves
+  the SPA fallback route: it runs the registered `ShellResponder`s and renders `index.html`
+  from the `ShellContributor`s on `FrontendConfig` (title, head, `#root` markup, `Vary` fields; built-ins for
+  the custom stylesheet and `InjectCodeInHeader` last), see
+  [ADR-0017](./adr/0017-spa-shell-contributors.md). `shell_csp.go` builds the shell's
+  Content-Security-Policy, see [ADR-0024](./adr/0024-security-response-headers.md).
+  `registrar.go` defines
   the `RouteRegistrar` interface and `RouterContext` (engine, auth cookie manager, CSRF cookie
-  manager, options) that every `internal/wiki/<domain>` package's `Routes` implements/receives —
+  manager, options; `APIAuthGroup`, `APIReadGroup`, and `CapabilityGroup` for identity-free
+  capability URLs, [ADR-0019](./adr/0019-capability-routes-without-identity.md)) that every
+  `internal/wiki/<domain>` package's `Routes` implements/receives —
   this is the seam that lets each domain slice register its own routes/middleware without the
   central router knowing about it. `dto/` holds shared HTTP response types
   (`dto/page.go`, `dto/tag.go`, `dto/property.go` — explicitly forbidden from importing
@@ -206,7 +246,9 @@ resync-derived state.
   - **`internal/http/middleware/security`** — `csrf.go`/`csrf_cookie.go` (double-submit CSRF,
     only enforced on mutating methods), `rate_limiter.go` (`KeyedLimiter` — sliding-window,
     reusable both as a full middleware and inline inside another middleware, e.g. API-key auth),
-    `untrusted_file.go` (response headers for serving user-uploaded files).
+    `untrusted_file.go` (response headers for serving user-uploaded files), `headers.go`
+    (`Headers` — `X-Frame-Options`, `Referrer-Policy`, `nosniff` on every response; the page CSP
+    comes from `shell_csp.go`, see [ADR-0024](./adr/0024-security-response-headers.md)).
   - **`internal/http/middleware/maintenance`** — `writegate.go`: blocks mutating requests during
     a restore, with an explicit segment-based (not substring-based) exemption list so the restore
     endpoint itself and a few other paths stay reachable while the gate is up.
@@ -241,7 +283,7 @@ shape for that domain.
 
 - **`internal/wiki/pages`** — the largest domain slice: CRUD + tree operations exposed over HTTP.
   One file per use case — `create_page.go`, `update_page.go`, `move_page.go`, `copy_page.go`,
-  `delete_page.go`, `convert_page.go` (page↔section), `get_page.go` (`PageQueries` — the read-only page lookups: by ID, path, title, permalink), `pin_page.go` (global editorial pin, see
+  `delete_page.go`, `convert_page.go` (page↔section), `get_page_view.go` (`GetPageViewByIDUseCase`/`GetPageViewByPathUseCase` — the single-page view shared by API and SEO: page plus frontmatter tags and properties via `page_metadata.go`; not a visibility layer), `get_first_page_path.go` (`GetFirstPagePathUseCase` — the first top-level page or section in navigation order, the target of the root redirect), `list_page_routes.go` (`ListPageRoutesUseCase` — route path, kind and last update of every page and section in navigation order, from one locked tree read; feeds the sitemap; `ListChildRoutesUseCase`, a page's direct children for the crawler body), `resolve_wiki_link.go` (`ResolveWikiLinkUseCase` — a `[[target]]` to its page's route by the rule stored links follow, for the crawler body), `get_page.go` (`PageQueries` — the remaining read-only lookups: path lookup, title, permalink), `pin_page.go` (global editorial pin, see
   distinction from favorites below), `ensure_path.go`, `refactor.go` (link-refactor
   trigger), `add_favorite.go`/`remove_favorite.go`/`list_favorites.go` (per-user favorites, note the explicit distinction: pin is global/editorial via
   `tree.SetPinned` in page frontmatter, favorites is per-user via `internal/favorites`, deliberately
@@ -265,6 +307,14 @@ shape for that domain.
   **`internal/wiki/links`** — thin HTTP slices over the matching top-level `internal/<name>`
   package (search query endpoint, tag listing/filter, property listing/filter, backlink/link-status
   endpoints respectively).
+- **`internal/wiki/shares`** — the public read surface of share links (#1252, `--enable-share-links`):
+  `GET /api/shared/{token}/page`, `/pages/{id}` and `/tree` in a capability group
+  ([ADR-0019](./adr/0019-capability-routes-without-identity.md)). The use cases resolve the token to a
+  `sharing.Grant`, turn it into a `scopedread.ReadScope` (`resolveScope`) and read through
+  `scopedread.PageReader` or `TreeReader` ([ADR-0015](./adr/0015-scoped-read-boundary.md)); every "no
+  such link or page" is the same 404, and failed lookups on any of the routes count towards one
+  per-client limit. The slice is registered at boot only when share links
+  are enabled; a runtime admin switch would move that decision into a provider checked per request.
 - **`internal/wiki/apikeys`** — API key CRUD HTTP surface over `core/auth`'s `APIKeyService`.
 - **`internal/wiki/assets`** — per-page asset upload/list/delete HTTP surface over
   `core/assets`.
@@ -281,7 +331,34 @@ shape for that domain.
 - **`internal/wiki/avatar`**, **`internal/wiki/usersettings`** — HTTP surfaces over
   `internal/avatar` and `internal/usersettings` (own avatar, own preferences).
 - **`internal/wiki/instancesettings`** — admin-only instance settings changeable at runtime
-  instead of via flag + restart; today the public-access toggle.
+  instead of via flag + restart: the public-access toggle and the page display settings.
+  `PUT /api/admin/settings/display` takes any subset of the `pagedisplay.Settings` JSON fields
+  (strictly decoded) and returns all of them; the older `toc-display` and `content-width`
+  routes stay for API clients.
+- **`internal/wiki/seo`** — search-engine rendering for public wikis
+  ([ADR-0018](./adr/0018-search-engine-rendering-for-public-wikis.md)); registers SPA shell
+  responders and contributors and its own routes. One file per feature holds its seo-owned
+  types, reader interface and use case; a reader shared by several use cases lives in its own
+  file. `shell.go`: `PublicOnly` (every registration and route of the slice runs only while
+  public access is on; `Handler(on, off)` for routes), the root redirect (`GET /` → 302 to the
+  first page), the page Markdown responder (`Accept: text/markdown` → the page's Markdown) and
+  the page meta contributor (robots `noindex` for routes without a page), then the crawler
+  body contributor (`Vary: User-Agent` on every public shell); `routes.go`:
+  `Routes` (`robots.txt`, `sitemap.xml`, GET and HEAD); `root_target.go`:
+  `GetRootTargetUseCase` behind the narrow `FirstPageReader`; `urls.go`: the URL helpers the
+  features share (escaped wiki path, absolute URL from `--public-url`, the page read's route
+  path without trailing slashes, the `/p/:id/:slug?` permalink locator, the only SPA route the
+  slice knows); `page.go`: `Page`, `PageReader` and `ErrPageNotFound`, the single-page read
+  shared by `page_meta.go` (`GetPageMetaUseCase`: title, description, canonical URL, or only
+  `NoIndex` when no page is at the route; `PermalinkResolver` for permalinks) and
+  `markdown.go` (`GetPageMarkdownUseCase` and the `Accept` negotiation); `robots.go`:
+  `GetRobotsUseCase` and `PrivateRobots`; `sitemap.go`: `BuildSitemapUseCase` behind
+  `PageRouteLister`, streamed by `WriteXML`; `crawler_body.go`: `GetCrawlerBodyUseCase`
+  (title, `internal/render` HTML and child links for search-engine user agents and for
+  any client with the `?ssr` preview parameter, behind
+  `PageReader` and `CrawlerBodyReader`; renders cached per page version, parallel renders
+  capped, least recently used dropped first). The readers are implemented in
+  `internal/wiki/seo_adapter.go` with the pages slice's read use cases.
 
 ## Frontend — `ui/leafwiki-ui/src/`
 
@@ -343,14 +420,24 @@ light/dark mode application).
   (`rehypeLineNumber.ts`, `rehypeCodeFenceLineNumbers.ts`, `rehypeWhitelistStyles.ts`,
   `remarkImageSize.ts`), markdown normalizers (`normalizeMarkdownBlocks.ts`,
   `normalizeMarkdownListIndentation.ts`), syntax highlighting (`syntaxHighlightLanguages.ts`,
-  `splitHighlightedLines.ts`), and the table of contents (`extractTocEntries.ts`,
-  `TocSidePanel.tsx`, `TocDropdownButton.tsx`, `useTocScrollSpy.ts`, `tocVisibility.ts`).
+  `splitHighlightedLines.ts`), and the page side panel / table of contents
+  (`extractTocEntries.ts`, `useTocScrollSpy.ts`, `tocVisibility.ts`). `TocSidePanel.tsx` and
+  `TocDropdownButton.tsx` render a list of sections (`pagePanelSection.ts`) that
+  `features/viewer/PageViewer.tsx` composes from `useHeadingsSection.ts`,
+  `features/viewer/useHighlightsSection.ts` and `features/viewer/attachmentsSection.ts`
+  ([ADR-0021](./adr/0021-page-side-panel-sections.md)); `collectHighlights.ts` reads the
+  `==text==` marks out of the rendered preview.
   Shared Markdown typography lives in `src/index.css`: screen prose is limited to 680px,
   with 16px text on phones and 17px from the `sm` breakpoint. Media, code and table
   blocks retain the available surface width in editor/history previews. The viewer centers
   all content in one 680px reading column, including media, code and tables, aligned with
   breadcrumbs, metadata and backlinks. Wrapped breadcrumbs grow the header, and
   expanded metadata values wrap within the reading column. Nested indentation and print layout stay separate.
+  The admin page width (Settings → Display, `contentWidth` in `/api/config`) can lift that
+  column for the page view only: `PageViewer.tsx` sets `data-content-width` on `.page-viewer`,
+  its subheader and its metadata bar, and `index.css` holds one `[data-content-width]` block per
+  width (`wide` = the full `max-w-5xl` layout from before #1696). The values live in
+  `lib/contentWidth.ts` and `internal/pagedisplay/content_width.go`.
 - **`features/progressbar`** — top-of-page loading progress bar (`progressbarStore.ts`, driven
   today by manual `setLoading` calls; a planned TanStack Query migration would drive this from
   `useIsFetching` instead — not yet implemented).
@@ -362,9 +449,10 @@ light/dark mode application).
 - **`features/settings`** — the unified settings page: `SettingsLayout.tsx`, `SettingsNav.tsx`
   (registry-driven section nav), `SettingsSectionGuard.tsx` (route-level role/feature guard),
   `adminSections.ts` (admin-only sections bundled into one lazy chunk),
-  `PublicAccessSettings.tsx`, `TocDisplaySettings.tsx`, and `account/` (visible to every user:
-  `AccountSettings.tsx`, `PreferencesPanel.tsx` with the language switcher, `AvatarPanel.tsx`,
-  `ChangeOwnPasswordPanel.tsx`, `TotpPanel.tsx`).
+  `PublicAccessSettings.tsx`, `DisplaySettings.tsx` (instance-wide page display; the registry
+  entry's `redirectFrom` keeps the old `/settings/toc-display` URL working), and `account/`
+  (visible to every user: `AccountSettings.tsx`, `PreferencesPanel.tsx` with the language
+  switcher, `AvatarPanel.tsx`, `ChangeOwnPasswordPanel.tsx`, `TotpPanel.tsx`).
 - **`features/shortcuts`** — keyboard shortcuts help dialog (`ShortcutsDialog.tsx`), consumes
   `lib/shortcuts/shortcutCatalog.ts`.
 - **`features/sidebar`** — left navigation sidebar shell and its accordion sections
@@ -380,13 +468,17 @@ light/dark mode application).
   (`TreeDnd.tsx`, `treeDndStore.ts`, `treeDndUtils.ts`), context menu
   (`TreeNodeActionsMenu.tsx`), and the flat pinned-pages sub-list (`PinnedSection.tsx`,
   `PinnedPageItem.tsx` — global/editorial pin, distinct from the per-user favorites star also
-  rendered on tree rows).
+  rendered on tree rows). With the "show subpage count" display setting on, section rows and
+  the section overview (`features/viewer/EmptySectionChildrenList.tsx`) show
+  `components/SubpageCount.tsx`: the number of direct children in the client tree, which is
+  already filtered for the viewer, so nothing is counted server side.
 - **`features/users`** — admin user management (`UserManagement.tsx`, `UserFormDialog.tsx`,
   create/edit/delete buttons and dialogs, `ResendInviteButton.tsx`, admin password change via
   `ChangePasswordDialog.tsx`). A user's own TOTP setup lives in `features/settings/account`.
 - **`features/viewer`** — the read-only page view: `PageViewer.tsx`, `Breadcrumbs.tsx`,
   `PageMetadata.tsx`, `EmptySectionChildrenList.tsx` (section-index rendering), scroll-to-heading
-  handling.
+  handling, and the highlights and attachments sections of the page side panel
+  (`useHighlightsSection.ts`, `attachmentsSection.ts`).
 - **`features/wikilinks`** — `WikiLinkDisambiguationDialog.tsx`, shown when a `[[Title]]` wikilink
   resolves to more than one page — see [ADR-0002: Wikilink Sentinel Encoding](./adr/0002-wikilink-sentinel-encoding.md) for how these
   links are represented internally.
@@ -404,7 +496,9 @@ Per [ADR-0006: Zustand Feature-Local Stores](./adr/0006-zustand-feature-local-st
   every dialog in `lib/registries/dialogRegistry.ts` is opened through this single store.
 - **`config.ts`** — server-reported instance config/feature flags (`publicAccess`,
   `authDisabled`, `enableRevision`, `enableLinkRefactor`, `gitBackupEnabled`, `snapshotEnabled`,
-  `maxAssetUploadSizeBytes`, ...), fetched once from `GET /api/config`.
+  `maxAssetUploadSizeBytes`, ...), fetched once from `GET /api/config`. The page display
+  settings are grouped in `pageDisplay` (`lib/pageDisplay.ts`: type, defaults,
+  `parsePageDisplay`) and changed through `updatePageDisplay(patch)`.
 - **`sidebarPanels.ts`** — which sidebar accordion sections (Pinned/Favorites/Pages) are expanded,
   persisted.
 - **`sidebar.ts`** — sidebar visibility, active mode (tree vs. search), and width, persisted.
@@ -419,8 +513,8 @@ Per [ADR-0006: Zustand Feature-Local Stores](./adr/0006-zustand-feature-local-st
 - **`apikeys.ts`** — API key list/create/delete.
 - **`branding.ts`** — logo/favicon/site-name state, including cache-busting version counters
   (`logoVersion`/`faviconVersion`).
-- **`editor.ts`** — editor UI state and preferences (preview layout, line wrap, auto-save
-  status) — persisted, but distinct from `features/editor/pageEditorStore.ts` which owns the actual
+- **`editor.ts`** — editor UI state and preferences (preview layout, line wrap, spell check,
+  auto-save status) — persisted, but distinct from `features/editor/pageEditorStore.ts` which owns the actual
   draft content/dirty state for the page currently open.
 - **`userSettings.ts`** — the user's own preferences (auto-save, language, date/time format),
   fetched via `GET /api/user-settings`, not persisted to localStorage (same pattern as
@@ -435,6 +529,9 @@ Per [ADR-0006: Zustand Feature-Local Stores](./adr/0006-zustand-feature-local-st
 - **`import.ts`** — import plan create/execute/cancel state, wraps `lib/api/import.ts`.
 - **`tocPanel.ts`** — collapsed/expanded state of the right-hand "On this page" TOC pane,
   persisted.
+- **`layoutPortals.ts`** — the subheader and TOC pane elements `AppLayout` renders for
+  `PageViewer` to portal into, handed over by reference because page content may reuse their
+  ids.
 - **`users.ts`** — user list/create/update/delete, own-password change.
 
 ### `components/ui/*`
@@ -473,8 +570,10 @@ building new ones.
   `pageSearch.ts` (flattened tree search index used by the quick switcher), `hotkeys.ts`
   (combo normalization), `useDebounce.ts`, `useIsMobile.ts`, `useAppMode.ts`,
   `useIsReadOnly.ts`, `bootstrapAuth.ts`, `handleFieldErrors.ts`, `deferState.ts`,
-  `scrollToHeadline.ts`, `useScrollRestoration.ts`, `useAutoCloseSidebarOnMobile.ts`,
-  `redirectToExternal.ts`, `navigationVisit.ts`, `dateLocale.ts`/`useDateTimeFormat.ts` (date
+  `scrollToHeadline.ts`, `pageContentRoot.ts` (selector of the viewer's rendered page),
+  `useScrollRestoration.ts`, `useAutoCloseSidebarOnMobile.ts`,
+  `redirectToExternal.ts`, `navigationVisit.ts`, `contentWidth.ts`/`pageDisplay.ts` (page
+  display settings, mirroring `internal/pagedisplay`), `dateLocale.ts`/`useDateTimeFormat.ts` (date
   formatting per user setting), `roles.ts`, `assetSrc.ts`, `dynamicImportError.ts` (recovery
   from stale lazy chunks after a deploy), `config.ts` (frontend-side constant defaults, e.g.
   `DEFAULT_MAX_ASSET_UPLOAD_SIZE_BYTES`). `*.bench.ts` files are Vitest benchmarks.
@@ -491,9 +590,10 @@ Preferences) is generated from the discovered locales. Steps to add a language:
 
 ### Other top-level `src/` files
 
-`main.tsx` (React root mount), `App.tsx` (top-level layout/providers, session-driven
-favorites load/clear), `App.css`/`index.css` (global styles), `useApplyDesignMode.tsx`
-(applies persisted light/dark mode to the document root), `test-setup.ts` (Vitest setup),
+`main.tsx` (React root mount; skipped for the `?ssr` preview, `lib/ssrPreview.ts`), `App.tsx`
+(top-level layout/providers, session-driven favorites load/clear), `App.css`/`index.css`
+(global styles), `useApplyDesignMode.tsx` (applies persisted light/dark mode to the document
+root), `test-setup.ts` (Vitest setup),
 `vite-env.d.ts`. `layout/AppLayout.tsx` is the single shared page chrome (toolbar + sidebar +
 content area) wrapping all routes.
 

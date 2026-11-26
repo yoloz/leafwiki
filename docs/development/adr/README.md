@@ -58,3 +58,14 @@ Status values: `Proposed`, `Accepted`, `Rejected`, `Deprecated`, `Superseded by 
 | [0011](./0011-smtp-cli-env-optional-feature.md) | SMTP as a CLI/ENV-only optional feature | Accepted |
 | [0012](./0012-portable-markdown-link-format.md) | Portable on-disk Markdown link format | Proposed |
 | [0013](./0013-per-store-sqlite-corruption-policy.md) | Each SQLite store chooses its corruption policy; real state is never deleted automatically | Accepted |
+| [0014](./0014-generated-api-documentation.md) | API documentation is generated (Swagger 2.0, pinned swag) and covered incrementally with exact exceptions | Proposed |
+| [0015](./0015-scoped-read-boundary.md) | Scoped reads go through `internal/scopedread`, not through the core services | Proposed |
+| [0016](./0016-state-store-registration.md) | State stores register once for snapshots and live restore | Proposed |
+| [0017](./0017-spa-shell-contributors.md) | The SPA shell is rendered through registered responders and contributors | Proposed |
+| [0018](./0018-search-engine-rendering-for-public-wikis.md) | Public wikis are rendered for search engines through the `seo` slice, gated on public access | Accepted |
+| [0019](./0019-capability-routes-without-identity.md) | Capability-URL routes run without identity, in their own route group | Proposed |
+| [0020](./0020-server-rendered-page-html-for-crawlers.md) | Page HTML for crawlers is rendered in `internal/render` and sanitized by a stricter server policy | Accepted |
+| [0021](./0021-page-side-panel-sections.md) | The page side panel renders sections composed by the page viewer | Proposed |
+| [0022](./0022-versioned-derived-search-index.md) | The search index persists across restarts and is rebuilt on a schema version or DDL mismatch or on corruption | Proposed |
+| [0023](./0023-throttle-failed-logins-per-user-and-client.md) | Failed logins are throttled per account and client; the client address is resolved through `--trusted-proxy-ips` | Proposed |
+| [0024](./0024-security-response-headers.md) | Security response headers come from one engine middleware, the page policy from the shell | Proposed |

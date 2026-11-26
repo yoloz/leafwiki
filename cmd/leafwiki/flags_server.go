@@ -4,17 +4,19 @@ import "github.com/urfave/cli/v3"
 
 // serverOptions holds the options for listener, data directory and logging.
 type serverOptions struct {
-	host              string
-	port              string
-	unixSocket        string
-	dataDir           string
-	basePath          string
-	allowInsecure     bool
-	noTLS             bool
-	tlsCert           string
-	tlsKey            string
-	logFormat         string
-	disableRequestLog bool
+	host                   string
+	port                   string
+	unixSocket             string
+	dataDir                string
+	basePath               string
+	publicURL              string
+	allowInsecure          bool
+	noTLS                  bool
+	tlsCert                string
+	tlsKey                 string
+	disableSecurityHeaders bool
+	logFormat              string
+	disableRequestLog      bool
 
 	// LLM (OpenAI-compatible) configuration for the "generate document from URL" feature.
 	llmBaseURL string
@@ -37,13 +39,15 @@ func (o *serverOptions) Flags() []cli.Flag {
 			Config:      trimmed,
 		},
 		&cli.StringFlag{
-			Name:        "port",
-			Destination: &o.port,
-			Category:    catServer,
-			Usage:       "port to run the server on",
-			Value:       "8080",
-			Sources:     envVars("LEAFWIKI_PORT"),
-			Config:      trimmed,
+			Name:             "port",
+			Destination:      &o.port,
+			Category:         catServer,
+			Usage:            "port to run the server on",
+			Value:            "8080",
+			Sources:          envPortVars("LEAFWIKI_PORT"),
+			Validator:        validatePortValue,
+			ValidateDefaults: true,
+			Config:           trimmed,
 		},
 		&cli.StringFlag{
 			Name:        "unix-socket",
@@ -70,12 +74,27 @@ func (o *serverOptions) Flags() []cli.Flag {
 			Sources:     envVars("LEAFWIKI_BASE_PATH"),
 			Config:      trimmed,
 		},
+		&cli.StringFlag{
+			Name:        "public-url",
+			Destination: &o.publicURL,
+			Category:    catServer,
+			Usage:       "public base URL of this wiki including --base-path, e.g. https://wiki.example.com/wiki; used for links in outgoing email (required with --smtp-host) and canonical links in public wikis",
+			Sources:     envVars("LEAFWIKI_PUBLIC_URL"),
+			Config:      trimmed,
+		},
 		&cli.BoolFlag{
 			Name:        "allow-insecure",
 			Destination: &o.allowInsecure,
 			Category:    catServer,
 			Usage:       "allow insecure HTTP; auth cookies may then travel in plain text",
 			Sources:     envBoolVars("LEAFWIKI_ALLOW_INSECURE"),
+		},
+		&cli.BoolFlag{
+			Name:        "disable-security-headers",
+			Destination: &o.disableSecurityHeaders,
+			Category:    catServer,
+			Usage:       "omit the security response headers (X-Frame-Options, Referrer-Policy, nosniff, the page's Content-Security-Policy); needed to embed the wiki in a page on another origin",
+			Sources:     envBoolVars("LEAFWIKI_DISABLE_SECURITY_HEADERS"),
 		},
 		&cli.StringFlag{
 			Name:        "tls-cert",

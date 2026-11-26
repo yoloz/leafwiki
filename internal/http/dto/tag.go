@@ -5,6 +5,7 @@ import (
 
 	"github.com/perber/wiki/internal/core/auth"
 	"github.com/perber/wiki/internal/core/tree"
+	coretags "github.com/perber/wiki/internal/tags"
 )
 
 // TagCount is returned by the tag listing endpoint.
@@ -13,18 +14,28 @@ type TagCount struct {
 	Count int    `json:"count"`
 }
 
+// ToTagCounts converts tag counts from the tag index; nil becomes an empty
+// slice so the response is [] rather than null.
+func ToTagCounts(in []coretags.TagCount) []TagCount {
+	out := make([]TagCount, len(in))
+	for i, tc := range in {
+		out[i] = TagCount{Tag: tc.Tag, Count: tc.Count}
+	}
+	return out
+}
+
 // TaggedPage is the reduced page DTO returned by the tag filter endpoint.
 type TaggedPage struct {
-	ID           string          `json:"id"`
-	Title        string          `json:"title"`
-	Path         string          `json:"path"`
-	Excerpt      string          `json:"excerpt,omitempty"`
-	Tags         []string        `json:"tags"`
-	CreatedAt    string          `json:"createdAt,omitempty"`
-	UpdatedAt    string          `json:"updatedAt,omitempty"`
-	CreatorID    string          `json:"creatorId,omitempty"`
-	LastAuthorID string          `json:"lastAuthorId,omitempty"`
-	LastAuthor   *auth.UserLabel `json:"lastAuthor,omitempty"`
+	ID           string     `json:"id"`
+	Title        string     `json:"title"`
+	Path         string     `json:"path"`
+	Excerpt      string     `json:"excerpt,omitempty"`
+	Tags         []string   `json:"tags"`
+	CreatedAt    string     `json:"createdAt,omitempty"`
+	UpdatedAt    string     `json:"updatedAt,omitempty"`
+	CreatorID    string     `json:"creatorId,omitempty"`
+	LastAuthorID string     `json:"lastAuthorId,omitempty"`
+	LastAuthor   *UserLabel `json:"lastAuthor,omitempty"`
 }
 
 // ToTaggedPage builds a TaggedPage from a PageNode, its tags, and an optional user resolver.
@@ -50,9 +61,7 @@ func ToTaggedPage(node *tree.PageNode, pageTags []string, excerpt string, userRe
 		p.UpdatedAt = node.Metadata.UpdatedAt.Format(time.RFC3339)
 	}
 
-	if userResolver != nil {
-		p.LastAuthor, _ = userResolver.ResolveUserLabel(node.Metadata.LastAuthorID)
-	}
+	p.LastAuthor = ResolveUserLabel(userResolver, node.Metadata.LastAuthorID)
 
 	return p
 }

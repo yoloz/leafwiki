@@ -24,6 +24,7 @@ cmd/leafwiki → internal/wiki (composition root) → internal/wiki/<slice> → 
 |---|---|---|
 | `internal/core/*` | Storage and domain primitives: tree, auth, revision, markdown, assets, settings, … | other `internal/core/*`, stdlib, third-party. **No** gin, no `internal/wiki`, no `internal/http`, no top-level `internal/*` packages |
 | `internal/<package>` (links, search, tags, properties, favorites, usersettings, backup, snapshot, restore, …) | Derived indexes and optional feature services built on core | `internal/core/*`, other top-level packages. **No** `internal/wiki`, no `internal/http` |
+| `internal/render` | Markdown → sanitized HTML for clients without the SPA (crawlers); pure, wikilinks resolved through a caller callback ([ADR-0020](./adr/0020-server-rendered-page-html-for-crawlers.md)) | `internal/core/markdown`, stdlib, goldmark, bluemonday. **No** `core/tree`, no HTTP, no `internal/wiki` |
 | `internal/http/**` | Router infrastructure, middleware, DTOs | everything below. **No** `internal/wiki` |
 | `internal/wiki/<slice>` | One capability's use cases + HTTP routes | layers below, plus `internal/wiki/pagesave`. **No** other slice |
 | `internal/wiki` (`wiki.go`, `wiki_boot.go`, `wiki_routes.go`, `wiki_resync.go`) | Composition root: builds and wires everything | everything |
@@ -47,8 +48,9 @@ orchestration of several services or anything HTTP-shaped → `internal/wiki/<sl
 
 **Cross-cutting rules (visibility, drafts, access control, …) do not go into `core/tree`.** The
 tree stays a plain structure store; such rules sit in a layer above it that all readers go
-through. Until that layer exists, don't add `if`s for them to `TreeService`; open an issue
-instead.
+through. For callers that may see only part of the wiki (share links), that layer is
+`internal/scopedread` ([ADR-0015](./adr/0015-scoped-read-boundary.md)); normal reads don't go
+through it yet. Don't add `if`s for such rules to `TreeService`; open an issue instead.
 
 ## Extensibility (strict)
 
@@ -62,7 +64,7 @@ architecture, even when they work.
 | **Open/Closed** | New features register at an extension point; shared code doesn't change to learn about them (rules 1–3 below). |
 | **Single Responsibility** | One use case per operation, one slice per capability; handlers only translate HTTP, use cases orchestrate, core stores. |
 | **Liskov Substitution** | Every implementation of a seam (`PageSideEffect`, `Provider`, a registry entry) must work wherever the seam is used: same error contract, no hidden preconditions, no panics the caller doesn't expect. `Managed` and `Fixed` settings are interchangeable. |
-| **Interface Segregation** | Consumers define small interfaces with only the methods they call (`importer.ImporterWiki`, `tocdisplay.Provider`), not a dependency on `*wiki.Wiki` or a whole service. |
+| **Interface Segregation** | Consumers define small interfaces with only the methods they call (`importer.ImporterWiki`, `pagedisplay.Provider`), not a dependency on `*wiki.Wiki` or a whole service. |
 | **Dependency Inversion** | Slices and features depend on interfaces; the composition root (`wiki.go`, `cmd/leafwiki`) picks and wires the implementations. |
 
 **The test for every change:** could a second feature of the same kind be added later without
@@ -75,11 +77,16 @@ Rules:
    | Seam | Where | Used for |
    |---|---|---|
    | `RouteRegistrar` | `internal/http/registrar.go` | each slice registers its own routes |
+   | `RouterContext.CapabilityGroup` | `internal/http/registrar.go` | read-only routes whose URL secret is the authorization (share links); no identity, hardened, never logged ([ADR-0019](./adr/0019-capability-routes-without-identity.md)) |
    | `PageSideEffect` | `internal/wiki/pagesave` | reactions to page create/update/move/delete/restore |
-   | `Provider` interfaces + `settings.Value` (`Managed`/`Fixed`) | `internal/publicaccess`, `internal/tocdisplay`, `internal/core/settings` | instance settings changeable at runtime or pinned by a flag |
+   | `ShellResponder` / `ShellContributor` on `FrontendConfig` | `internal/http/shell.go` | the HTML document served for SPA routes: title, head and `#root` markup, or another response ([ADR-0017](./adr/0017-spa-shell-contributors.md)) |
+   | `Provider` interfaces + `settings.Value` (`Managed`/`Fixed`) | `internal/publicaccess`, `internal/pagedisplay`, `internal/core/settings` | instance settings changeable at runtime or pinned by a flag |
    | Narrow consumer interfaces | e.g. `importer.ImporterWiki` | a package depends on what it needs, not on `*wiki.Wiki` |
+   | State store registration (`stateDBs` + `restore.SwappableStore`) | `internal/restore/swap.go`, `Wiki.StateStores` | a new SQLite store with real state joins snapshots and live restore ([ADR-0016](./adr/0016-state-store-registration.md)) |
+   | Scoped readers (`ReadScope` + one reader per resource) | `internal/scopedread` | reading part of the wiki for a caller that may not see all of it ([ADR-0015](./adr/0015-scoped-read-boundary.md)) |
    | Dialog, panel-item and settings-section registries | `ui/leafwiki-ui/src/lib/registries/` | dialogs, sidebar panels, settings pages |
    | Toolbar actions | `useToolbarActions` per feature | toolbar buttons |
+   | Page panel sections (`PagePanelSection`) | `features/preview/pagePanelSection.ts`, composed in `features/viewer/PageViewer.tsx` | groups in the page side panel and its dropdown (headings, attachments, …) ([ADR-0021](./adr/0021-page-side-panel-sections.md)) |
 
 2. **No fitting seam → add the extension point first**, in its own PR, with the existing
    behaviour as its first user and no behaviour change. Then build the feature on it. A new
@@ -95,7 +102,9 @@ Rules:
    is an existing exception.)
 5. **Cross-cutting rules (visibility, drafts, access control) never go into `core/tree` or into
    individual handlers.** They belong in one layer above the tree that every reader goes
-   through. Until that layer exists, such a feature starts by building it.
+   through. For scoped callers this is `internal/scopedread`
+   ([ADR-0015](./adr/0015-scoped-read-boundary.md)); a feature that needs it for other reads
+   extends that layer rather than building a second one.
 6. **Depend on narrow interfaces at seams**, defined by the consumer ("accept interfaces"), so
    implementations can be swapped or added without touching the consumer.
 7. **Optional features can be switched off**: a flag or setting, read in one place (the
@@ -207,6 +216,7 @@ Accept a `ctx`, check `ctx.Err()` between phases and return it (see `runReloadPh
   | `_not_found` | 404 | `page_not_found` |
   | `_already_exists`, `_conflict`, `_already_running`, `_version_conflict` | 409 | `page_version_conflict` |
   | `_too_large` | 413 | `asset_file_too_large` |
+  | `_too_many_<what>` | 429 | `share_link_too_many_attempts` |
   | `_unavailable` (temporary, e.g. a store suspended during restore) | 503 | `auth_user_store_unavailable` |
   | `_internal_error`, `_failed` | 500 | `asset_upload_failed` |
 
@@ -293,6 +303,12 @@ the slice you are in, don't invent a new one.
   `document.write`, `srcDoc`, `eval`, `new Function`); the ESLint XSS guard enforces it. HTML
   reaches the DOM only through the sanitized Markdown pipeline in `features/preview`. A justified
   exception gets `eslint-disable-next-line` plus a comment explaining why the input is safe.
+- Never mutate the DOM React renders for page content (wrapping text in `<mark>`, splitting
+  or moving nodes). React still holds the original nodes, so the next reconcile throws
+  `NotFoundError` (`insertBefore`/`removeChild`) and the preview error boundary replaces the
+  page. Decorate with the CSS Custom Highlight API (`CSS.highlights` plus `::highlight()`, as
+  [`lib/scrollToSearchQuery.ts`](../../ui/leafwiki-ui/src/lib/scrollToSearchQuery.ts) does for
+  the search match), or render the decoration through the Markdown pipeline.
 - Reuse `components/` (`BaseDialog`, `ListView`, `FormInput`, …) and `components/ui/` before
   building something new. Strings via i18n, form controls via shadcn (see `AGENTS.md`).
 
@@ -309,6 +325,14 @@ LeafWiki ships for Linux (amd64, 386, arm64), Windows, macOS and Raspberry Pi as
 - Check that it builds for Windows and macOS: `make cross` (build and vet for
   windows/amd64 and darwin/arm64). *Enforced by the `build-go-cross` job in
   `.github/workflows/backend.yml`, which runs the same target.*
+- Tests run on Windows too: *the `test-go-windows` job in `.github/workflows/backend.yml`
+  enforces it.* Compiling for Windows isn't enough, because filesystem behaviour differs.
+- Close every file and database handle you open, in tests as well (register the close with
+  `t.Cleanup`). Windows can't delete an open file, so the `t.TempDir()` cleanup fails.
+- Build `file://` URLs from paths with `test_utils.FileURL`, never `"file://" + path`.
+- Skip or guard a test on Windows only for behaviour that doesn't exist there (Unix permission
+  bits, Unix shell scripts), with the reason in the message. Don't assume a tool is on the
+  runner's `PATH`.
 
 ## Naming
 
@@ -380,6 +404,9 @@ A change to how pages, frontmatter, folders or links are stored on disk:
 
 Starting an older binary on a newer schema fails with a clear error; keep that behaviour.
 Derived indexes (SQLite) don't need a migration: bump their schema and rebuild via resync.
+`search.db`: bump `searchSchemaVersion` for any change to its tables, tokenizer options or the
+text written into them; `ensureSchema` then rebuilds it empty on the next open
+([ADR-0022](./adr/0022-versioned-derived-search-index.md)).
 
 A new SQLite store chooses a `CorruptionPolicy` at its constructor
 ([ADR-0013](./adr/0013-per-store-sqlite-corruption-policy.md)): derived index →
@@ -583,3 +610,6 @@ the convention, remove dead helpers. Constraints:
   (`make verify-commits BASE=origin/main` locally). Informational, not required: PRs are
   usually rebase-merged; one with messy commits is squash-merged under a title the maintainer
   sets, so the PR title only matters then.
+- A change users or admins notice carries a `Behavior-Change:` trailer in its commit
+  ([commit style](../../CONTRIBUTING.md#commit-style)); `scripts/changelog.sh` lists these at
+  the top of the release notes.

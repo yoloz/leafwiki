@@ -17,7 +17,6 @@ type emailOptions struct {
 	smtpSecurity           string
 	smtpInsecureSkipVerify bool
 	smtpTimeout            time.Duration
-	publicURL              string
 }
 
 // Flags declares them. Adding an option here is the whole change: the flag,
@@ -34,12 +33,14 @@ func (o *emailOptions) Flags() []cli.Flag {
 			Config:      trimmed,
 		},
 		&cli.IntFlag{
-			Name:        "smtp-port",
-			Destination: &o.smtpPort,
-			Category:    catEmail,
-			Usage:       "SMTP server port",
-			Value:       587,
-			Sources:     envVars("LEAFWIKI_SMTP_PORT"),
+			Name:             "smtp-port",
+			Destination:      &o.smtpPort,
+			Category:         catEmail,
+			Usage:            "SMTP server port",
+			Value:            587,
+			Sources:          envPortVars("LEAFWIKI_SMTP_PORT"),
+			Validator:        validatePortNumber,
+			ValidateDefaults: true,
 		},
 		&cli.StringFlag{
 			Name:        "smtp-username",
@@ -98,14 +99,6 @@ func (o *emailOptions) Flags() []cli.Flag {
 			Value:       10 * time.Second,
 			Sources:     envVars("LEAFWIKI_SMTP_TIMEOUT"),
 			DefaultText: "10s",
-		},
-		&cli.StringFlag{
-			Name:        "public-url",
-			Destination: &o.publicURL,
-			Category:    catEmail,
-			Usage:       "base URL for links in outgoing email, e.g. https://wiki.example.com (required with --smtp-host)",
-			Sources:     envVars("LEAFWIKI_PUBLIC_URL"),
-			Config:      trimmed,
 		},
 	}
 }

@@ -1,6 +1,9 @@
 package auth
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -8,7 +11,11 @@ import (
 	"github.com/pquerna/otp/totp"
 
 	sharederrors "github.com/perber/wiki/internal/core/shared/errors"
+	"github.com/perber/wiki/internal/test_utils"
 )
+
+// testClient is the already grouped client identity the tests log in from.
+const testClient Client = "192.0.2.1"
 
 func setupTestAuthService(t *testing.T) *AuthService {
 	t.Helper()
@@ -16,6 +23,7 @@ func setupTestAuthService(t *testing.T) *AuthService {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(store.Close, t) })
 	userService := NewUserService(store)
 
 	// Create test user
@@ -29,6 +37,7 @@ func setupTestAuthService(t *testing.T) *AuthService {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(sessionStore.Close, t) })
 
 	sessions := NewSessionManager(sessionStore, "test-secret-key-for-unit-tests-1", 1*time.Hour, 24*time.Hour*7)
 	authService := NewAuthService(userService, sessions, nil)
@@ -52,6 +61,7 @@ func setupTOTPTestFixture(t *testing.T) *totpTestFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(store.Close, t) })
 	userService := NewUserService(store)
 
 	user, err := userService.CreateUser("testuser", "test@example.com", "securepass", "admin")
@@ -63,6 +73,7 @@ func setupTOTPTestFixture(t *testing.T) *totpTestFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(sessionStore.Close, t) })
 
 	totpService, err := NewTOTPService(testEncryptionKey())
 	if err != nil {
@@ -112,7 +123,7 @@ func (f *totpTestFixture) currentCode(t *testing.T) string {
 func TestAuthService_Login_TOTPEnabled_ReturnsChallengeInsteadOfTokens(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	result, err := f.authService.Login("testuser", "securepass")
+	result, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -131,7 +142,7 @@ func TestAuthService_Login_TOTPEnabled_ReturnsChallengeInsteadOfTokens(t *testin
 func TestAuthService_Login_TOTPEnabled_WrongPasswordStillRejected(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	if _, err := f.authService.Login("testuser", "wrong-password"); err != ErrUserInvalidCredentials {
+	if _, err := f.authService.Login("testuser", "wrong-password", testClient); err != ErrUserInvalidCredentials {
 		t.Fatalf("expected ErrUserInvalidCredentials, got %v", err)
 	}
 }
@@ -139,7 +150,7 @@ func TestAuthService_Login_TOTPEnabled_WrongPasswordStillRejected(t *testing.T) 
 func TestAuthService_CompleteTOTPLogin_ValidCodeIssuesTokens(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	challenge, err := f.authService.Login("testuser", "securepass")
+	challenge, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -164,7 +175,7 @@ func TestAuthService_CompleteTOTPLogin_ValidCodeIssuesTokens(t *testing.T) {
 func TestAuthService_CompleteTOTPLogin_InvalidCodeRejected(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	challenge, err := f.authService.Login("testuser", "securepass")
+	challenge, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -186,7 +197,7 @@ func TestAuthService_CompleteTOTPLogin_InvalidCodeRejected(t *testing.T) {
 func TestAuthService_CompleteTOTPLogin_UserStoreSuspended_ReturnsStoreUnavailable(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	challenge, err := f.authService.Login("testuser", "securepass")
+	challenge, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -211,7 +222,7 @@ func TestAuthService_CompleteTOTPLogin_UserStoreSuspended_ReturnsStoreUnavailabl
 func TestAuthService_CompleteTOTPLogin_ChallengeIsSingleUse(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	challenge, err := f.authService.Login("testuser", "securepass")
+	challenge, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -235,7 +246,7 @@ func TestAuthService_CompleteTOTPLogin_ChallengeIsSingleUse(t *testing.T) {
 func TestAuthService_CompleteTOTPLogin_RecoveryCodeWorksOnceAndOnlyOnce(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	challenge1, err := f.authService.Login("testuser", "securepass")
+	challenge1, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -252,7 +263,7 @@ func TestAuthService_CompleteTOTPLogin_RecoveryCodeWorksOnceAndOnlyOnce(t *testi
 	}
 
 	// A second, fresh login challenge must reject the now-consumed recovery code.
-	challenge2, err := f.authService.Login("testuser", "securepass")
+	challenge2, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("second Login failed: %v", err)
 	}
@@ -267,36 +278,35 @@ func TestAuthService_CompleteTOTPLogin_RecoveryCodeWorksOnceAndOnlyOnce(t *testi
 }
 
 // TestAuthService_TOTPGuessing_CannotBypassLockoutViaRepeatedCorrectPasswordLogin
-// is the regression test for the login-lockout bypass: Login() must not reset
-// the shared per-user attempt counter while TOTP is still required, or an
-// attacker who already knows the password could keep resetting the guess
-// budget by resubmitting it, turning the 6-digit TOTP code into an
-// unlimited-attempt guessing target. Alternating a correct-password login
-// with a wrong TOTP guess must still hit the account lock within
-// loginMaxFailures combined attempts.
+// pins that a correct password does not give the code step a fresh guess
+// budget: whoever knows the password could otherwise alternate a login with a
+// wrong code and turn the 6-digit code into an unlimited-attempt guessing
+// target. The code step keeps its own per-user lock, which a password login
+// never touches, so the lock must trip within totpMaxAttempts wrong codes
+// while every one of those password logins is still accepted.
 func TestAuthService_TOTPGuessing_CannotBypassLockoutViaRepeatedCorrectPasswordLogin(t *testing.T) {
 	f := setupTOTPTestFixture(t)
+	freezeLoginClocks(f.authService)
 
 	locked := false
-	for i := 0; i < 10; i++ {
-		challenge, err := f.authService.Login("testuser", "securepass")
+	for i := 0; i < 2*totpMaxAttempts; i++ {
+		challenge, err := f.authService.Login("testuser", "securepass", testClient)
 		if err != nil {
-			if err == ErrUserAccountLocked {
-				locked = true
-				break
-			}
-			t.Fatalf("Login failed unexpectedly on iteration %d: %v", i, err)
+			t.Fatalf("a correct password login was refused on iteration %d: %v", i, err)
 		}
 
 		_, err = f.authService.CompleteTOTPLogin(challenge.LoginChallengeToken, "000000")
-		if err == ErrUserAccountLocked {
+		if err == ErrLoginThrottled {
 			locked = true
+			if i != totpMaxAttempts {
+				t.Fatalf("locked after %d wrong codes, want %d", i, totpMaxAttempts)
+			}
 			break
 		}
 	}
 
 	if !locked {
-		t.Fatal("expected repeated correct-password logins interleaved with wrong TOTP guesses to eventually lock the account")
+		t.Fatal("expected repeated correct-password logins interleaved with wrong TOTP guesses to lock the code step")
 	}
 }
 
@@ -305,21 +315,17 @@ func TestAuthService_TOTPGuessing_CannotBypassLockoutViaRepeatedCorrectPasswordL
 // concurrent login attempts presenting the same still-valid recovery code
 // must not all succeed — the code must be consumable exactly once even under
 // concurrency, not just when used sequentially. Reuses a single challenge
-// token across all attempts (rather than one per attempt) since Login() no
-// longer resets the shared lockout counter for TOTP-enabled accounts —
-// several sequential Login() calls would otherwise trip the account lock
-// before any CompleteTOTPLogin call runs, which is exactly the bypass that
-// change closed.
+// token across all attempts, since one challenge is all the race needs.
 func TestAuthService_CompleteTOTPLogin_ConcurrentRecoveryCodeUseOnlyOneSucceeds(t *testing.T) {
 	f := setupTOTPTestFixture(t)
 
-	challenge, err := f.authService.Login("testuser", "securepass")
+	challenge, err := f.authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	// Stay safely under loginMaxFailures so this test only exercises the
-	// recovery-code race, not the (separately tested) account lockout.
+	// Stay safely under totpMaxAttempts so this test only exercises the
+	// recovery-code race, not the (separately tested) code lock.
 	const attempts = 3
 	results := make(chan error, attempts)
 	var wg sync.WaitGroup
@@ -357,7 +363,7 @@ func TestAuthService_CompleteTOTPLogin_NotConfiguredWhenNoEncryptionKey(t *testi
 	// Login itself must fail fast with a clear error here, rather than issuing
 	// a challenge CompleteTOTPLogin could never redeem (which would strand the
 	// user on a code prompt with no valid code to enter).
-	_, err := authServiceNoTOTP.Login("testuser", "securepass")
+	_, err := authServiceNoTOTP.Login("testuser", "securepass", testClient)
 	if err == nil {
 		t.Fatal("expected error when TOTP service is not configured")
 	}
@@ -373,6 +379,7 @@ func mustNewSessionStore(t *testing.T) *SessionStore {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(s.Close, t) })
 	return s
 }
 
@@ -393,6 +400,7 @@ func setupTOTPSetupFixture(t *testing.T) *totpSetupFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(store.Close, t) })
 	userService := NewUserService(store)
 
 	user, err := userService.CreateUser("testuser", "test@example.com", "securepass", "admin")
@@ -404,6 +412,7 @@ func setupTOTPSetupFixture(t *testing.T) *totpSetupFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { test_utils.WrapCloseWithErrorCheck(sessionStore.Close, t) })
 
 	totpService, err := NewTOTPService(testEncryptionKey())
 	if err != nil {
@@ -782,7 +791,7 @@ func TestAuthService_GetTOTPStatus_RecoveryCodesRemainingReachesZeroAfterAllCons
 	}
 
 	for i, recoveryCode := range codes {
-		challenge, err := f.authService.Login("testuser", "securepass")
+		challenge, err := f.authService.Login("testuser", "securepass", testClient)
 		if err != nil {
 			t.Fatalf("Login failed on iteration %d: %v", i, err)
 		}
@@ -815,7 +824,7 @@ func TestAuthService_GetTOTPStatus_RecoveryCodesRemainingReachesZeroAfterAllCons
 func TestAuthService_LoginAndValidateToken(t *testing.T) {
 	authService := setupTestAuthService(t)
 
-	tokens, err := authService.Login("testuser", "securepass")
+	tokens, err := authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -834,11 +843,51 @@ func TestAuthService_LoginAndValidateToken(t *testing.T) {
 	}
 }
 
+// A throttled attempt must take as long to reject as an unknown identifier,
+// which already pays for a dummy bcrypt comparison; a throttle that answers
+// without one tells the two apart by response time alone. The minimum over
+// several runs keeps scheduler noise out: the gap being closed is a whole
+// bcrypt run.
+func TestAuthService_Login_ThrottledAttemptTakesAsLongAsUnknownUser(t *testing.T) {
+	authService := setupTestAuthService(t)
+	freezeLoginClocks(authService)
+
+	for i := 0; i < loginFreeAttempts; i++ {
+		if _, err := authService.Login("testuser", "wrong-guess", testClient); err != ErrUserInvalidCredentials {
+			t.Fatalf("attempt %d: expected ErrUserInvalidCredentials, got %v", i, err)
+		}
+	}
+
+	fastest := func(identifier string, wantErr error) time.Duration {
+		t.Helper()
+		var best time.Duration
+		for i := 0; i < 5; i++ {
+			start := time.Now()
+			_, err := authService.Login(identifier, "securepass", testClient)
+			elapsed := time.Since(start)
+			if err != wantErr {
+				t.Fatalf("Login(%q): expected %v, got %v", identifier, wantErr, err)
+			}
+			if i == 0 || elapsed < best {
+				best = elapsed
+			}
+		}
+		return best
+	}
+
+	unknown := fastest("no-such-user", ErrUserInvalidCredentials)
+	throttled := fastest("testuser", ErrLoginThrottled)
+
+	if throttled < unknown/2 {
+		t.Fatalf("throttled attempt rejected in %v, unknown identifier in %v: the throttle is visible by timing", throttled, unknown)
+	}
+}
+
 func TestAuthService_RevokeRefreshToken(t *testing.T) {
 	authService := setupTestAuthService(t)
 
 	// Login to get a refresh token
-	tokens, err := authService.Login("testuser", "securepass")
+	tokens, err := authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -892,7 +941,7 @@ func TestAuthService_RevokeRefreshToken_AccessToken(t *testing.T) {
 	authService := setupTestAuthService(t)
 
 	// Login to get tokens
-	tokens, err := authService.Login("testuser", "securepass")
+	tokens, err := authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -912,12 +961,12 @@ func TestAuthService_RevokeAllUserSessions(t *testing.T) {
 	authService := setupTestAuthService(t)
 
 	// Create multiple sessions by logging in multiple times
-	tokens1, err := authService.Login("testuser", "securepass")
+	tokens1, err := authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("First login failed: %v", err)
 	}
 
-	tokens2, err := authService.Login("testuser", "securepass")
+	tokens2, err := authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("Second login failed: %v", err)
 	}
@@ -968,12 +1017,12 @@ func TestAuthService_RevokeAllUserSessions_MultipleUsers(t *testing.T) {
 	}
 
 	// Login both users
-	tokens1, err := authService.Login("testuser", "securepass")
+	tokens1, err := authService.Login("testuser", "securepass", testClient)
 	if err != nil {
 		t.Fatalf("First user login failed: %v", err)
 	}
 
-	tokens2, err := authService.Login("testuser2", "securepass2")
+	tokens2, err := authService.Login("testuser2", "securepass2", testClient)
 	if err != nil {
 		t.Fatalf("Second user login failed: %v", err)
 	}
@@ -1028,5 +1077,48 @@ func TestAuthService_Close_ClosesSessionAndUserStores(t *testing.T) {
 	}
 	if authService.userService.store.db != nil {
 		t.Fatal("expected user store db to be closed")
+	}
+}
+
+func TestAuthService_Login_RejectedBranchesLogTheClient(t *testing.T) {
+	tests := []struct {
+		name       string
+		identifier string
+		password   string
+		attempts   int
+		wantLine   string
+	}{
+		{name: "unknown identifier", identifier: "nobody", password: "whatever", attempts: 1, wantLine: "invalid credentials"},
+		{name: "wrong password", identifier: "testuser", password: "wrong-password", attempts: 1, wantLine: "invalid credentials"},
+		{name: "throttled attempt", identifier: "testuser", password: "wrong-password", attempts: loginFreeAttempts + 1, wantLine: "login throttled"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The service captures slog.Default() when it is built, so the
+			// capturing logger has to be installed first.
+			var logs bytes.Buffer
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+			authService := setupTestAuthService(t)
+
+			for i := 0; i < tt.attempts; i++ {
+				_, _ = authService.Login(tt.identifier, tt.password, testClient)
+			}
+
+			var matched bool
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, tt.wantLine) {
+					matched = true
+					if !strings.Contains(line, "client="+string(testClient)) {
+						t.Fatalf("log line %q does not carry client=%s", line, testClient)
+					}
+				}
+			}
+			if !matched {
+				t.Fatalf("expected a log line containing %q, got:\n%s", tt.wantLine, logs.String())
+			}
+		})
 	}
 }
