@@ -15,6 +15,17 @@ import '@fontsource/inter/500-italic.css'
 import '@fontsource/inter/600-italic.css'
 import '@fontsource/inter/700-italic.css'
 
+// Noto Sans SC (body) + JetBrains Mono (code), bundled locally so the wiki
+// works without any external CDN request. Import the Chinese-simplified and
+// latin subsets explicitly rather than the all-subset CSS: a single CJK
+// subset file covers the glyphs without pulling in every script variant.
+import '@fontsource/noto-sans-sc/chinese-simplified-400.css'
+import '@fontsource/noto-sans-sc/chinese-simplified-700.css'
+import '@fontsource/noto-sans-sc/latin-400.css'
+import '@fontsource/noto-sans-sc/latin-700.css'
+import '@fontsource/jetbrains-mono/latin-400.css'
+import '@fontsource/jetbrains-mono/latin-700.css'
+
 const root = document.getElementById('root')!
 
 if (!isSSRPreview(window.location.search, root)) {
