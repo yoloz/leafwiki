@@ -30,8 +30,10 @@ new_repo() {
 }
 
 # changelog <repo>: runs changelog.sh v1 v2 in <repo> and prints the result.
+# CI sets GITHUB_REPOSITORY to whichever fork runs the checks; clear it so the
+# compare links below stay deterministic (the script's perber/leafwiki default).
 changelog() {
-    (cd "$1" && PATH="$WORK/bin:$PATH" "$ROOT/scripts/changelog.sh" v1 v2 >/dev/null) &&
+    (cd "$1" && env -u GITHUB_REPOSITORY PATH="$WORK/bin:$PATH" "$ROOT/scripts/changelog.sh" v1 v2 >/dev/null) &&
         cat "$1/current_release_changelog.md"
 }
 
