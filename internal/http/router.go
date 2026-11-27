@@ -329,7 +329,7 @@ func NewRouter(registrars []RouteRegistrar, frontendCfg FrontendConfig, opts Rou
 			panic("failed to create sub FS: " + err.Error())
 		}
 
-		base.StaticFS("/static", http.FS(staticFS))
+		base.Match(GetAndHead, "/static/*filepath", newStaticAssetsHandler(staticFS))
 
 		base.Match(GetAndHead, "/favicon.svg", func(c *gin.Context) {
 			disableClientCache(c)
