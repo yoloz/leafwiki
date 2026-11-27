@@ -15,6 +15,7 @@ vi.mock('child_process', async (importOriginal) => {
 import { brotliDecompressSync, gunzipSync } from 'node:zlib'
 import {
   chunkFileName,
+  precompressAssetsPlugin,
   precompressSource,
   resolveAppVersion,
   stripDevShellBody,
@@ -48,7 +49,9 @@ describe('chunkFileName', () => {
     // Go's //go:embed skips files starting with "_" or "." when embedding a
     // directory, so such a chunk (e.g. mermaid's lodash "_baseUniq") would
     // 404 at runtime and break the lazy import that depends on it.
-    expect(chunkFileName({ name: '_baseUniq' })).toBe('static/baseUniq-[hash].js')
+    expect(chunkFileName({ name: '_baseUniq' })).toBe(
+      'static/baseUniq-[hash].js',
+    )
     expect(chunkFileName({ name: '.hidden' })).toBe('static/hidden-[hash].js')
   })
 
@@ -72,8 +75,22 @@ describe('stripDevShellBody', () => {
   })
 })
 
+describe('precompressAssetsPlugin', () => {
+  it('runs after Vite resolves the __VITE_PRELOAD__ markers', () => {
+    // Vite's build-import-analysis uses a plain generateBundle hook. A plain
+    // hook here would compress the code before the markers were replaced, so
+    // browsers (which prefer .br/.gz) would execute an undefined identifier.
+    // Post-order is what keeps compressed variants byte-identical to .js.
+    expect(precompressAssetsPlugin.generateBundle).toMatchObject({
+      order: 'post',
+    })
+  })
+})
+
 describe('precompressSource', () => {
-  const js = 'function f(){return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n'.repeat(20)
+  const js = 'function f(){return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n'.repeat(
+    20,
+  )
 
   it('compresses scripts into gzip and brotli variants', () => {
     const compressed = precompressSource('static/index-abc123.js', js)
@@ -83,7 +100,9 @@ describe('precompressSource', () => {
     expect(gunzipSync(compressed!.gzip).toString()).toBe(js)
     expect(brotliDecompressSync(compressed!.brotli).toString()).toBe(js)
     expect(compressed!.gzip.byteLength).toBeLessThan(Buffer.byteLength(js))
-    expect(compressed!.brotli.byteLength).toBeLessThan(compressed!.gzip.byteLength)
+    expect(compressed!.brotli.byteLength).toBeLessThan(
+      compressed!.gzip.byteLength,
+    )
   })
 
   it('compresses assets given as bytes', () => {

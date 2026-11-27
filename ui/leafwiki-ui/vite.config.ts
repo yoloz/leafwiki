@@ -78,7 +78,10 @@ export function precompressSource(
   if (!precompressibleExtensions.test(fileName)) {
     return undefined
   }
-  const data = typeof source === 'string' ? Buffer.from(source, 'utf-8') : Buffer.from(source)
+  const data =
+    typeof source === 'string'
+      ? Buffer.from(source, 'utf-8')
+      : Buffer.from(source)
   return {
     gzip: gzipSync(data, { level: 9 }),
     brotli: brotliCompressSync(data, {
@@ -87,24 +90,43 @@ export function precompressSource(
   }
 }
 
-const precompressAssetsPlugin: Plugin = {
+export const precompressAssetsPlugin: Plugin = {
   name: 'leafwiki-precompress-assets',
   apply: 'build',
-  generateBundle(_options, bundle) {
-    // Object.keys snapshot: emitFile adds the .gz/.br variants to the bundle
-    // while we iterate, and they must not be recompressed themselves.
-    for (const fileName of Object.keys(bundle)) {
-      const file = bundle[fileName]
-      if (file.type !== 'chunk' && file.type !== 'asset') {
-        continue
+  // Vite replaces the __VITE_PRELOAD__ markers in its own generateBundle
+  // hook. Compressing in a plain hook runs before that replacement and puts
+  // the unresolved marker into the .gz/.br files the browser prefers — the
+  // .js files are fixed but the served compressed variants are not. 'post'
+  // makes the variants byte-identical to the final .js files.
+  generateBundle: {
+    order: 'post',
+    handler(_options, bundle) {
+      // Object.keys snapshot: emitFile adds the .gz/.br variants to the
+      // bundle while we iterate, and they must not be recompressed.
+      for (const fileName of Object.keys(bundle)) {
+        const file = bundle[fileName]
+        if (file.type !== 'chunk' && file.type !== 'asset') {
+          continue
+        }
+        const compressed = precompressSource(
+          fileName,
+          file.type === 'chunk' ? file.code : file.source,
+        )
+        if (!compressed) {
+          continue
+        }
+        this.emitFile({
+          type: 'asset',
+          fileName: `${fileName}.gz`,
+          source: compressed.gzip,
+        })
+        this.emitFile({
+          type: 'asset',
+          fileName: `${fileName}.br`,
+          source: compressed.brotli,
+        })
       }
-      const compressed = precompressSource(fileName, file.type === 'chunk' ? file.code : file.source)
-      if (!compressed) {
-        continue
-      }
-      this.emitFile({ type: 'asset', fileName: `${fileName}.gz`, source: compressed.gzip })
-      this.emitFile({ type: 'asset', fileName: `${fileName}.br`, source: compressed.brotli })
-    }
+    },
   },
 }
 
