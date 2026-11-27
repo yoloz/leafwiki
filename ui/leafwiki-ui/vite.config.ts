@@ -1,4 +1,5 @@
 import { execSync } from 'child_process'
+import { brotliCompressSync, constants, gzipSync } from 'node:zlib'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 import { defineConfig, type ConfigEnv, type Plugin } from 'vite'
@@ -63,6 +64,50 @@ const devShellPlaceholders: Plugin = {
   transformIndexHtml: stripDevShellBody,
 }
 
+// The Go server picks a precompressed variant by Accept-Encoding
+// (internal/http/static.go), so every byte the browser receives on first
+// visit is already compressed at build time — no runtime CPU, which matters
+// on Raspberry Pi-class hosts. Images and fonts are already compressed
+// formats; recompressing them wastes build time.
+const precompressibleExtensions = /\.(?:js|mjs|css|svg|json|txt|xml)$/
+
+export function precompressSource(
+  fileName: string,
+  source: string | Uint8Array,
+): { gzip: Uint8Array; brotli: Uint8Array } | undefined {
+  if (!precompressibleExtensions.test(fileName)) {
+    return undefined
+  }
+  const data = typeof source === 'string' ? Buffer.from(source, 'utf-8') : Buffer.from(source)
+  return {
+    gzip: gzipSync(data, { level: 9 }),
+    brotli: brotliCompressSync(data, {
+      params: { [constants.BROTLI_PARAM_QUALITY]: 9 },
+    }),
+  }
+}
+
+const precompressAssetsPlugin: Plugin = {
+  name: 'leafwiki-precompress-assets',
+  apply: 'build',
+  generateBundle(_options, bundle) {
+    // Object.keys snapshot: emitFile adds the .gz/.br variants to the bundle
+    // while we iterate, and they must not be recompressed themselves.
+    for (const fileName of Object.keys(bundle)) {
+      const file = bundle[fileName]
+      if (file.type !== 'chunk' && file.type !== 'asset') {
+        continue
+      }
+      const compressed = precompressSource(fileName, file.type === 'chunk' ? file.code : file.source)
+      if (!compressed) {
+        continue
+      }
+      this.emitFile({ type: 'asset', fileName: `${fileName}.gz`, source: compressed.gzip })
+      this.emitFile({ type: 'asset', fileName: `${fileName}.br`, source: compressed.brotli })
+    }
+  },
+}
+
 // https://vite.dev/config/
 export default defineConfig(({ command }: ConfigEnv) => ({
   // Relative base so asset paths in the built HTML are ./static/... instead of /static/...
@@ -73,7 +118,7 @@ export default defineConfig(({ command }: ConfigEnv) => ({
   define: {
     __APP_VERSION__: JSON.stringify(resolveAppVersion()),
   },
-  plugins: [react(), devShellPlaceholders],
+  plugins: [react(), devShellPlaceholders, precompressAssetsPlugin],
   server: {
     proxy: {
       '/assets': {

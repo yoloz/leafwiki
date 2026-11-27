@@ -12,8 +12,10 @@ vi.mock('child_process', async (importOriginal) => {
   }
 })
 
+import { brotliDecompressSync, gunzipSync } from 'node:zlib'
 import {
   chunkFileName,
+  precompressSource,
   resolveAppVersion,
   stripDevShellBody,
 } from './vite.config'
@@ -67,5 +69,35 @@ describe('stripDevShellBody', () => {
         '<title>{{__PAGE_TITLE__}}</title><div id="root">{{__BODY__}}</div>',
       ),
     ).toBe('<title>{{__PAGE_TITLE__}}</title><div id="root"></div>')
+  })
+})
+
+describe('precompressSource', () => {
+  const js = 'function f(){return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n'.repeat(20)
+
+  it('compresses scripts into gzip and brotli variants', () => {
+    const compressed = precompressSource('static/index-abc123.js', js)
+    expect(compressed).toBeDefined()
+    // Round-trip, so the Go server can serve these bytes verbatim with the
+    // matching Content-Encoding.
+    expect(gunzipSync(compressed!.gzip).toString()).toBe(js)
+    expect(brotliDecompressSync(compressed!.brotli).toString()).toBe(js)
+    expect(compressed!.gzip.byteLength).toBeLessThan(Buffer.byteLength(js))
+    expect(compressed!.brotli.byteLength).toBeLessThan(compressed!.gzip.byteLength)
+  })
+
+  it('compresses assets given as bytes', () => {
+    const svg = Buffer.from('<svg><rect/></svg>'.repeat(10))
+    const compressed = precompressSource('static/logo.abc123.svg', svg)
+    expect(gunzipSync(compressed!.gzip).equals(svg)).toBe(true)
+  })
+
+  it('skips already-compressed formats and the emitted variants themselves', () => {
+    // Fonts and images are compressed formats, and the .gz/.br artifacts the
+    // plugin emits must never be fed back through the compressor.
+    expect(precompressSource('static/font.abc123.woff2', 'x')).toBeUndefined()
+    expect(precompressSource('static/logo.abc123.png', 'x')).toBeUndefined()
+    expect(precompressSource('static/index-abc123.js.gz', 'x')).toBeUndefined()
+    expect(precompressSource('static/index-abc123.js.br', 'x')).toBeUndefined()
   })
 })
