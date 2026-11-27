@@ -26,9 +26,14 @@ import '@fontsource/noto-sans-sc/latin-700.css'
 import '@fontsource/jetbrains-mono/latin-400.css'
 import '@fontsource/jetbrains-mono/latin-700.css'
 
+// Locale bundles load lazily (see lib/i18n.ts); don't paint before the
+// default language's namespaces are in place, or the first frame shows keys.
+import { i18nReady } from './lib/i18n'
+
 const root = document.getElementById('root')!
 
 if (!isSSRPreview(window.location.search, root)) {
+  await i18nReady
   createRoot(root).render(
     <StrictMode>
       <App />

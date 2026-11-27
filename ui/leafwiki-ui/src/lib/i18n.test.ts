@@ -103,13 +103,17 @@ describe('section.subpageCount plural forms', () => {
     { lang: 'fr', count: 12, want: '12 sous-pages' },
     { lang: 'zh', count: 1, want: '1 个子页面' },
     { lang: 'zh', count: 12, want: '12 个子页面' },
-  ])('$lang, $count -> "$want"', ({ lang, count, want }) => {
+  ])('$lang, $count -> "$want"', async ({ lang, count, want }) => {
+    // Locales load lazily; changeLanguage resolves after the target
+    // language's namespaces have arrived.
+    await i18next.changeLanguage(lang)
     const t = i18next.getFixedT(lang, 'viewer')
     expect(t('section.subpageCount', { count })).toBe(want)
   })
 
-  it('covers every shipped locale', () => {
+  it('covers every shipped locale', async () => {
     for (const { code } of getAvailableLanguages()) {
+      await i18next.changeLanguage(code)
       const t = i18next.getFixedT(code, 'viewer')
       const text = t('section.subpageCount', { count: 3 })
       expect(text, code).toContain('3')

@@ -107,7 +107,9 @@ describe('loadConfig defaultLanguage', () => {
 
     await useConfigStore.getState().loadConfig()
 
-    expect(i18next.language).toBe('de')
+    // Locale bundles load lazily; changeLanguage resolves after the target
+    // language's namespaces arrive.
+    await vi.waitFor(() => expect(i18next.language).toBe('de'))
     expect(useConfigStore.getState().defaultLanguage).toBe('de')
   })
 

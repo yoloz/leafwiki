@@ -60,7 +60,7 @@ describe('useUserSettingsStore', () => {
 
     expect(useUserSettingsStore.getState().language).toBe('de')
     expect(useUserSettingsStore.getState().loaded).toBe(true)
-    expect(i18next.language).toBe('de')
+    await vi.waitFor(() => expect(i18next.language).toBe('de'))
   })
 
   it('loadUserSettings ignores an unshipped language code', async () => {
@@ -83,7 +83,7 @@ describe('useUserSettingsStore', () => {
 
     const promise = useUserSettingsStore.getState().setLanguage('de')
     expect(useUserSettingsStore.getState().language).toBe('de')
-    expect(i18next.language).toBe('de')
+    await vi.waitFor(() => expect(i18next.language).toBe('de'))
 
     resolveUpdate(makeSettings({ language: 'de' }))
     await promise
@@ -100,7 +100,7 @@ describe('useUserSettingsStore', () => {
     await useUserSettingsStore.getState().setLanguage('de')
 
     expect(useUserSettingsStore.getState().language).toBe('en')
-    expect(i18next.language).toBe('en')
+    await vi.waitFor(() => expect(i18next.language).toBe('en'))
     expect(toast.error).toHaveBeenCalled()
   })
 
